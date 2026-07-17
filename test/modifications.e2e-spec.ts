@@ -1,6 +1,12 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
-import { DesignCategory, DesignStatus, ModificationStatus, OrderStatus, Role } from '@prisma/client';
+import {
+  DesignCategory,
+  DesignStatus,
+  ModificationStatus,
+  OrderStatus,
+  Role,
+} from '@prisma/client';
 import { AppModule } from '@/app.module';
 import { PrismaService } from '@/modules/prisma/prisma.service';
 import { internalRequest } from './utils/internal-request';
@@ -39,7 +45,9 @@ describe('Modifications (e2e)', () => {
     });
     await prisma.user.update({ where: { email: adminEmail }, data: { role: Role.ADMIN } });
     adminAccessToken = (
-      await internalRequest(app).post('/auth/login').send({ email: adminEmail, password: 'CorrectHorse1' })
+      await internalRequest(app)
+        .post('/auth/login')
+        .send({ email: adminEmail, password: 'CorrectHorse1' })
     ).body.tokens.accessToken;
 
     const ownerReg = await internalRequest(app).post('/auth/register').send({
@@ -95,10 +103,14 @@ describe('Modifications (e2e)', () => {
     await prisma.modificationEvent.deleteMany({ where: { modification: { designId } } });
     await prisma.modificationSelectedOption.deleteMany({ where: { modification: { designId } } });
     await prisma.modification.deleteMany({ where: { designId } });
-    await prisma.modificationOption.deleteMany({ where: { id: { in: [addRoomOptionId, resizeOptionId] } } });
+    await prisma.modificationOption.deleteMany({
+      where: { id: { in: [addRoomOptionId, resizeOptionId] } },
+    });
     await prisma.order.deleteMany({ where: { designId } });
     await prisma.design.delete({ where: { id: designId } });
-    await prisma.user.deleteMany({ where: { email: { in: [adminEmail, ownerEmail, strangerEmail] } } });
+    await prisma.user.deleteMany({
+      where: { email: { in: [adminEmail, ownerEmail, strangerEmail] } },
+    });
     await app.close();
   });
 

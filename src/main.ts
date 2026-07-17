@@ -2,7 +2,6 @@ import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import { IoAdapter } from '@nestjs/platform-socket.io';
 import helmet from 'helmet';
 import { AppModule } from '@/app.module';
 import { AppConfig } from '@/config/configuration';
@@ -13,9 +12,6 @@ async function bootstrap(): Promise<void> {
   const config = app.get(ConfigService<AppConfig, true>);
 
   app.use(helmet());
-  // Socket.IO gateway (whiteboard) rides the same HTTP server; reachable
-  // only via the frontend's WS proxy, never directly — see WhiteboardGateway.
-  app.useWebSocketAdapter(new IoAdapter(app));
 
   app.enableCors({
     origin: config.get('corsAllowedOrigin', { infer: true }),

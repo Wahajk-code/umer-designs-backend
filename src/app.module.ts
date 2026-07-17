@@ -19,7 +19,6 @@ import { PaymentsModule } from '@/modules/payments/payments.module';
 import { OrdersModule } from '@/modules/orders/orders.module';
 import { ModificationsModule } from '@/modules/modifications/modifications.module';
 import { MeetingsModule } from '@/modules/meetings/meetings.module';
-import { WhiteboardModule } from '@/modules/whiteboard/whiteboard.module';
 import { MailModule } from '@/modules/mail/mail.module';
 import { NotificationsModule } from '@/modules/notifications/notifications.module';
 import { PaymentLinksModule } from '@/modules/payment-links/payment-links.module';
@@ -57,7 +56,6 @@ import { WebhooksModule } from '@/modules/webhooks/webhooks.module';
     OrdersModule,
     ModificationsModule,
     MeetingsModule,
-    WhiteboardModule,
     MailModule,
     NotificationsModule,
     PaymentLinksModule,

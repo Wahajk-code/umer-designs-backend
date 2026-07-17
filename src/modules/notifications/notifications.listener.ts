@@ -73,7 +73,7 @@ export class NotificationsListener {
       {
         subject: `Payment received — ${payload.designTitle} modification`,
         heading: 'Payment received — work is starting',
-        body: `We've received your payment for changes to ${payload.designTitle}. Track progress, message the architect, and use the shared whiteboard from your request page.`,
+        body: `We've received your payment for changes to ${payload.designTitle}. Track progress and message the architect from your request page.`,
         ctaLabel: 'View tracking',
         ctaUrl: `${this.origin}/modifications/${payload.modificationId}`,
       },

@@ -98,15 +98,19 @@ describe('Payment Links (e2e)', () => {
     const listRes = await internalRequest(app)
       .get('/admin/payment-links')
       .set('Authorization', `Bearer ${adminAccessToken}`);
-    const linkId = listRes.body.paymentLinks.find((l: { clientEmail: string }) => l.clientEmail === userEmail.toLowerCase())?.id;
+    const linkId = listRes.body.paymentLinks.find(
+      (l: { clientEmail: string }) => l.clientEmail === userEmail.toLowerCase(),
+    )?.id;
     expect(linkId).toBeDefined();
 
-    const webhookRes = await internalRequest(app).post('/webhooks/stripe').send({
-      eventId: `evt_e2e_paylink_${Date.now()}`,
-      eventType: 'checkout.session.completed',
-      paymentIntentId: 'pi_e2e_paylink',
-      metadata: { kind: 'payment_link', recordId: linkId },
-    });
+    const webhookRes = await internalRequest(app)
+      .post('/webhooks/stripe')
+      .send({
+        eventId: `evt_e2e_paylink_${Date.now()}`,
+        eventType: 'checkout.session.completed',
+        paymentIntentId: 'pi_e2e_paylink',
+        metadata: { kind: 'payment_link', recordId: linkId },
+      });
     expect(webhookRes.status).toBe(200);
 
     const redeemAgain = await internalRequest(app).post(`/payment-links/${token}/redeem`);
@@ -117,7 +121,9 @@ describe('Payment Links (e2e)', () => {
     const listRes = await internalRequest(app)
       .get('/admin/payment-links')
       .set('Authorization', `Bearer ${adminAccessToken}`);
-    const linkId = listRes.body.paymentLinks.find((l: { clientEmail: string }) => l.clientEmail === userEmail.toLowerCase())?.id;
+    const linkId = listRes.body.paymentLinks.find(
+      (l: { clientEmail: string }) => l.clientEmail === userEmail.toLowerCase(),
+    )?.id;
 
     const res = await internalRequest(app)
       .patch(`/admin/payment-links/${linkId}/cancel`)

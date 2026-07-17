@@ -82,7 +82,9 @@ describe('Referrals (e2e)', () => {
     await prisma.referral.deleteMany({ where: { referredId } });
     await prisma.order.deleteMany({ where: { designId } });
     await prisma.design.delete({ where: { id: designId } });
-    await prisma.user.deleteMany({ where: { email: { in: [adminEmail, referrerEmail, referredEmail] } } });
+    await prisma.user.deleteMany({
+      where: { email: { in: [adminEmail, referrerEmail, referredEmail] } },
+    });
     await app.close();
   });
 
@@ -111,12 +113,14 @@ describe('Referrals (e2e)', () => {
       data: { userId: referredId, designId, amountCents: 100000 },
     });
 
-    const webhookRes = await internalRequest(app).post('/webhooks/stripe').send({
-      eventId: `evt_e2e_ref_${Date.now()}`,
-      eventType: 'checkout.session.completed',
-      paymentIntentId: 'pi_e2e_ref',
-      metadata: { kind: 'design_order', recordId: order.id },
-    });
+    const webhookRes = await internalRequest(app)
+      .post('/webhooks/stripe')
+      .send({
+        eventId: `evt_e2e_ref_${Date.now()}`,
+        eventType: 'checkout.session.completed',
+        paymentIntentId: 'pi_e2e_ref',
+        metadata: { kind: 'design_order', recordId: order.id },
+      });
     expect(webhookRes.status).toBe(200);
 
     const referral = await prisma.referral.findUnique({ where: { referredId } });

@@ -99,7 +99,6 @@ model User {
   referralsAsReferrer  Referral[]           @relation("ReferrerRecord")
   referralAsReferred   Referral?            @relation("ReferredRecord")
   modificationEvents   ModificationEvent[]
-  whiteboardSnapshots  WhiteboardSnapshot[]
 
   @@map("users")
 }
@@ -229,7 +228,6 @@ model Modification {
   selectedOptions    ModificationSelectedOption[]
   events             ModificationEvent[]
   meetings           Meeting[]
-  whiteboardSessions WhiteboardSession[]
   files              ModificationFile[]
 
   @@map("modifications")
@@ -294,33 +292,6 @@ model Meeting {
   updatedAt      DateTime      @updatedAt @map("updated_at")
 
   @@map("meetings")
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-// Whiteboard
-// ─────────────────────────────────────────────────────────────────────────
-
-model WhiteboardSession {
-  id             String       @id @default(uuid())
-  modificationId String       @map("modification_id")
-  modification   Modification @relation(fields: [modificationId], references: [id], onDelete: Cascade)
-  createdAt      DateTime     @default(now()) @map("created_at")
-
-  snapshots WhiteboardSnapshot[]
-
-  @@map("whiteboard_sessions")
-}
-
-model WhiteboardSnapshot {
-  id        String            @id @default(uuid())
-  sessionId String            @map("session_id")
-  session   WhiteboardSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  authorId  String?           @map("author_id")
-  author    User?             @relation(fields: [authorId], references: [id], onDelete: SetNull)
-  data      Json
-  createdAt DateTime          @default(now()) @map("created_at")
-
-  @@map("whiteboard_snapshots")
 }
 
 // ─────────────────────────────────────────────────────────────────────────

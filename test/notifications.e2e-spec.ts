@@ -80,20 +80,22 @@ describe('Notifications (e2e)', () => {
       data: { userId, designId, amountCents: 100000 },
     });
 
-    const webhookRes = await internalRequest(app).post('/webhooks/stripe').send({
-      eventId: `evt_e2e_notif_${Date.now()}`,
-      eventType: 'checkout.session.completed',
-      paymentIntentId: 'pi_e2e_notif',
-      metadata: { kind: 'design_order', recordId: order.id },
-    });
+    const webhookRes = await internalRequest(app)
+      .post('/webhooks/stripe')
+      .send({
+        eventId: `evt_e2e_notif_${Date.now()}`,
+        eventType: 'checkout.session.completed',
+        paymentIntentId: 'pi_e2e_notif',
+        metadata: { kind: 'design_order', recordId: order.id },
+      });
     expect(webhookRes.status).toBe(200);
 
     const listRes = await internalRequest(app)
       .get('/notifications/me')
       .set('Authorization', `Bearer ${userAccessToken}`);
-    expect(listRes.body.notifications.some((n: { type: string }) => n.type === 'ORDER_CONFIRMED')).toBe(
-      true,
-    );
+    expect(
+      listRes.body.notifications.some((n: { type: string }) => n.type === 'ORDER_CONFIRMED'),
+    ).toBe(true);
     expect(listRes.body.unreadCount).toBeGreaterThan(0);
   });
 

@@ -97,11 +97,13 @@ describe('Orders + Webhooks (e2e)', () => {
 
   it('rejects an unattested (no internal HMAC) call to the internal webhook route', async () => {
     const request = (await import('supertest')).default;
-    const res = await request(app.getHttpServer()).post('/webhooks/stripe').send({
-      eventId: 'evt_e2e_1',
-      eventType: 'checkout.session.completed',
-      metadata: { kind: 'design_order', recordId: 'does-not-matter' },
-    });
+    const res = await request(app.getHttpServer())
+      .post('/webhooks/stripe')
+      .send({
+        eventId: 'evt_e2e_1',
+        eventType: 'checkout.session.completed',
+        metadata: { kind: 'design_order', recordId: 'does-not-matter' },
+      });
     expect(res.status).toBe(401);
   });
 
@@ -110,12 +112,14 @@ describe('Orders + Webhooks (e2e)', () => {
       data: { userId, designId, amountCents: 145000 },
     });
 
-    const first = await internalRequest(app).post('/webhooks/stripe').send({
-      eventId: 'evt_e2e_2',
-      eventType: 'checkout.session.completed',
-      paymentIntentId: 'pi_e2e_2',
-      metadata: { kind: 'design_order', recordId: order.id },
-    });
+    const first = await internalRequest(app)
+      .post('/webhooks/stripe')
+      .send({
+        eventId: 'evt_e2e_2',
+        eventType: 'checkout.session.completed',
+        paymentIntentId: 'pi_e2e_2',
+        metadata: { kind: 'design_order', recordId: order.id },
+      });
     expect(first.status).toBe(200);
 
     const paid = await prisma.order.findUnique({ where: { id: order.id } });
@@ -123,12 +127,14 @@ describe('Orders + Webhooks (e2e)', () => {
     expect(paid?.stripePaymentIntentId).toBe('pi_e2e_2');
 
     // Replay with the same event id must not throw or double-process.
-    const replay = await internalRequest(app).post('/webhooks/stripe').send({
-      eventId: 'evt_e2e_2',
-      eventType: 'checkout.session.completed',
-      paymentIntentId: 'pi_e2e_2',
-      metadata: { kind: 'design_order', recordId: order.id },
-    });
+    const replay = await internalRequest(app)
+      .post('/webhooks/stripe')
+      .send({
+        eventId: 'evt_e2e_2',
+        eventType: 'checkout.session.completed',
+        paymentIntentId: 'pi_e2e_2',
+        metadata: { kind: 'design_order', recordId: order.id },
+      });
     expect(replay.status).toBe(200);
   });
 
