@@ -1,0 +1,384 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────────────────
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum DesignCategory {
+  CONTAINER
+  RESIDENTIAL
+}
+
+enum DesignStatus {
+  DRAFT
+  PUBLISHED
+  HIDDEN
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum ModificationStatus {
+  SUBMITTED
+  IN_REVIEW
+  IN_PROGRESS
+  REVISION
+  DELIVERED
+}
+
+enum MeetingStatus {
+  REQUESTED
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum PaymentLinkStatus {
+  OPEN
+  PAID
+  EXPIRED
+  CANCELLED
+}
+
+enum ReferralStatus {
+  PENDING
+  REWARDED
+}
+
+enum NotificationType {
+  ORDER_CONFIRMED
+  QUOTE_READY
+  PAYMENT_RECEIVED
+  STATUS_CHANGE
+  MEETING_BOOKED
+  DELIVERY_COMPLETE
+  REFERRAL_REWARDED
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Core
+// ─────────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  passwordHash  String   @map("password_hash")
+  firstName     String   @map("first_name")
+  lastName      String   @map("last_name")
+  role          Role     @default(USER)
+  referralCode  String   @unique @map("referral_code")
+  referredById  String?  @map("referred_by_id")
+  referredBy    User?    @relation("Referrals", fields: [referredById], references: [id], onDelete: SetNull)
+  referredUsers User[]   @relation("Referrals")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  refreshTokens        RefreshToken[]
+  orders               Order[]
+  modifications        Modification[]
+  meetings             Meeting[]
+  notifications        Notification[]
+  paymentLinksCreated  PaymentLink[]        @relation("PaymentLinksCreatedByAdmin")
+  paymentLinksReceived PaymentLink[]        @relation("PaymentLinksForClient")
+  referralsAsReferrer  Referral[]           @relation("ReferrerRecord")
+  referralAsReferred   Referral?            @relation("ReferredRecord")
+  modificationEvents   ModificationEvent[]
+  whiteboardSnapshots  WhiteboardSnapshot[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String   @map("token_hash")
+  familyId   String   @map("family_id")
+  revoked    Boolean  @default(false)
+  replacedBy String?  @map("replaced_by")
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([familyId])
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Listings
+// ─────────────────────────────────────────────────────────────────────────
+
+model Design {
+  id                  String         @id @default(uuid())
+  title               String
+  slug                String         @unique
+  category            DesignCategory
+  status              DesignStatus   @default(DRAFT)
+  basePriceCents      Int            @map("base_price_cents")
+  bedrooms            Int
+  bathrooms           Decimal        @db.Decimal(3, 1)
+  sqft                Int
+  estimatedBuildCents Int            @map("estimated_build_cents")
+  summary             String
+  description         String
+  coverImageUrl       String         @map("cover_image_url")
+  galleryUrls         String[]       @map("gallery_urls")
+  createdAt           DateTime       @default(now()) @map("created_at")
+  updatedAt           DateTime       @updatedAt @map("updated_at")
+
+  files         DesignFile[]
+  orders        Order[]
+  modifications Modification[]
+
+  @@map("designs")
+}
+
+model DesignFile {
+  id                 String   @id @default(uuid())
+  designId           String   @map("design_id")
+  design             Design   @relation(fields: [designId], references: [id], onDelete: Cascade)
+  label              String
+  cloudinaryPublicId String   @map("cloudinary_public_id")
+  resourceType       String   @map("resource_type")
+  format             String
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@map("design_files")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Orders / Payments
+// ─────────────────────────────────────────────────────────────────────────
+
+model Order {
+  id                      String      @id @default(uuid())
+  userId                  String      @map("user_id")
+  user                    User        @relation(fields: [userId], references: [id], onDelete: Restrict)
+  designId                String      @map("design_id")
+  design                  Design      @relation(fields: [designId], references: [id], onDelete: Restrict)
+  amountCents             Int         @map("amount_cents")
+  status                  OrderStatus @default(PENDING)
+  stripeCheckoutSessionId String?     @unique @map("stripe_checkout_session_id")
+  stripePaymentIntentId   String?     @unique @map("stripe_payment_intent_id")
+  paidAt                  DateTime?   @map("paid_at")
+  createdAt               DateTime    @default(now()) @map("created_at")
+  updatedAt               DateTime    @updatedAt @map("updated_at")
+
+  @@map("orders")
+}
+
+model ProcessedStripeEvent {
+  id        String   @id
+  type      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("processed_stripe_events")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Modifications
+// ─────────────────────────────────────────────────────────────────────────
+
+model ModificationOption {
+  id             String   @id @default(uuid())
+  label          String
+  description    String?
+  addedCostCents Int      @map("added_cost_cents")
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  modificationOptions ModificationSelectedOption[]
+
+  @@map("modification_options")
+}
+
+model Modification {
+  id                      String             @id @default(uuid())
+  orderRef                String             @unique @default(uuid()) @map("order_ref")
+  userId                  String             @map("user_id")
+  user                    User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  designId                String             @map("design_id")
+  design                  Design             @relation(fields: [designId], references: [id], onDelete: Restrict)
+  status                  ModificationStatus @default(SUBMITTED)
+  basePriceCents          Int                @map("base_price_cents")
+  totalAmountCents        Int                @map("total_amount_cents")
+  stripeCheckoutSessionId String?            @unique @map("stripe_checkout_session_id")
+  stripePaymentIntentId   String?            @unique @map("stripe_payment_intent_id")
+  paidAt                  DateTime?          @map("paid_at")
+  deliveredAt             DateTime?          @map("delivered_at")
+  createdAt               DateTime           @default(now()) @map("created_at")
+  updatedAt               DateTime           @updatedAt @map("updated_at")
+
+  selectedOptions    ModificationSelectedOption[]
+  events             ModificationEvent[]
+  meetings           Meeting[]
+  whiteboardSessions WhiteboardSession[]
+  files              ModificationFile[]
+
+  @@map("modifications")
+}
+
+model ModificationSelectedOption {
+  id                    String             @id @default(uuid())
+  modificationId        String             @map("modification_id")
+  modification          Modification       @relation(fields: [modificationId], references: [id], onDelete: Cascade)
+  optionId              String             @map("option_id")
+  option                ModificationOption @relation(fields: [optionId], references: [id], onDelete: Restrict)
+  priceAtSelectionCents Int                @map("price_at_selection_cents")
+
+  @@unique([modificationId, optionId])
+  @@map("modification_selected_options")
+}
+
+model ModificationEvent {
+  id             String              @id @default(uuid())
+  modificationId String              @map("modification_id")
+  modification   Modification        @relation(fields: [modificationId], references: [id], onDelete: Cascade)
+  authorId       String?             @map("author_id")
+  author         User?               @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  kind           String // STATUS_CHANGE | COMMENT
+  fromStatus     ModificationStatus?
+  toStatus       ModificationStatus?
+  comment        String?
+  createdAt      DateTime            @default(now()) @map("created_at")
+
+  @@map("modification_events")
+}
+
+model ModificationFile {
+  id                 String       @id @default(uuid())
+  modificationId     String       @map("modification_id")
+  modification       Modification @relation(fields: [modificationId], references: [id], onDelete: Cascade)
+  label              String
+  cloudinaryPublicId String       @map("cloudinary_public_id")
+  resourceType       String       @map("resource_type")
+  format             String
+  isFinal            Boolean      @default(false) @map("is_final")
+  createdAt          DateTime     @default(now()) @map("created_at")
+
+  @@map("modification_files")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Meetings
+// ─────────────────────────────────────────────────────────────────────────
+
+model Meeting {
+  id             String        @id @default(uuid())
+  userId         String        @map("user_id")
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  modificationId String?       @map("modification_id")
+  modification   Modification? @relation(fields: [modificationId], references: [id], onDelete: SetNull)
+  status         MeetingStatus @default(REQUESTED)
+  scheduledAt    DateTime      @map("scheduled_at")
+  link           String?
+  notes          String?
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  @@map("meetings")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Whiteboard
+// ─────────────────────────────────────────────────────────────────────────
+
+model WhiteboardSession {
+  id             String       @id @default(uuid())
+  modificationId String       @map("modification_id")
+  modification   Modification @relation(fields: [modificationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  snapshots WhiteboardSnapshot[]
+
+  @@map("whiteboard_sessions")
+}
+
+model WhiteboardSnapshot {
+  id        String            @id @default(uuid())
+  sessionId String            @map("session_id")
+  session   WhiteboardSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  authorId  String?           @map("author_id")
+  author    User?             @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  data      Json
+  createdAt DateTime          @default(now()) @map("created_at")
+
+  @@map("whiteboard_snapshots")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Notifications
+// ─────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id           String           @id @default(uuid())
+  userId       String           @map("user_id")
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type         NotificationType
+  payload      Json
+  readAt       DateTime?        @map("read_at")
+  sentViaEmail Boolean          @default(false) @map("sent_via_email")
+  createdAt    DateTime         @default(now()) @map("created_at")
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Payment links
+// ─────────────────────────────────────────────────────────────────────────
+
+model PaymentLink {
+  id                      String            @id @default(uuid())
+  createdByAdminId        String            @map("created_by_admin_id")
+  createdByAdmin          User              @relation("PaymentLinksCreatedByAdmin", fields: [createdByAdminId], references: [id], onDelete: Restrict)
+  clientId                String?           @map("client_id")
+  client                  User?             @relation("PaymentLinksForClient", fields: [clientId], references: [id], onDelete: SetNull)
+  clientEmail             String            @map("client_email")
+  description             String
+  amountCents             Int               @map("amount_cents")
+  tokenHash               String            @unique @map("token_hash")
+  status                  PaymentLinkStatus @default(OPEN)
+  stripeCheckoutSessionId String?           @unique @map("stripe_checkout_session_id")
+  expiresAt               DateTime          @map("expires_at")
+  paidAt                  DateTime?         @map("paid_at")
+  createdAt               DateTime          @default(now()) @map("created_at")
+
+  @@map("payment_links")
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Referrals
+// ─────────────────────────────────────────────────────────────────────────
+
+model Referral {
+  id           String         @id @default(uuid())
+  referrerId   String         @map("referrer_id")
+  referrer     User           @relation("ReferrerRecord", fields: [referrerId], references: [id], onDelete: Cascade)
+  referredId   String         @unique @map("referred_id")
+  referred     User           @relation("ReferredRecord", fields: [referredId], references: [id], onDelete: Cascade)
+  rewardStatus ReferralStatus @default(PENDING) @map("reward_status")
+  rewardCents  Int            @default(3000) @map("reward_cents")
+  rewardedAt   DateTime?      @map("rewarded_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  @@index([referrerId])
+  @@map("referrals")
+}
