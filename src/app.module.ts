@@ -11,6 +11,7 @@ import { JwtAuthGuard } from '@/common/guards/jwt-auth.guard';
 import { RolesGuard } from '@/common/guards/roles.guard';
 import { SecurityModule } from '@/common/security/security.module';
 import { PrismaModule } from '@/modules/prisma/prisma.module';
+import { HealthModule } from '@/modules/health/health.module';
 import { AuthModule } from '@/modules/auth/auth.module';
 import { UsersModule } from '@/modules/users/users.module';
 import { CloudinaryModule } from '@/modules/cloudinary/cloudinary.module';
@@ -47,6 +48,7 @@ import { WebhooksModule } from '@/modules/webhooks/webhooks.module';
     }),
     EventEmitterModule.forRoot(),
     SecurityModule,
+    HealthModule,
     PrismaModule,
     AuthModule,
     UsersModule,

@@ -1,13 +1,20 @@
 import { ExecutionContext, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Reflector } from '@nestjs/core';
 import { InternalAttestationGuard } from '@/common/guards/internal-attestation.guard';
 import { ReplayCacheService } from '@/common/security/replay-cache.service';
 import { signInternalRequest } from '@/common/security/internal-signature.util';
+import { SkipInternalAttestation } from '@/common/decorators/skip-internal-attestation.decorator';
 import { AppConfig } from '@/config/configuration';
 
 const SECRET = 'test-secret-value-that-is-long-enough';
 
-function makeContext(headers: Record<string, string>, method = 'GET', url = '/designs') {
+function makeContext(
+  headers: Record<string, string>,
+  method = 'GET',
+  url = '/designs',
+  handler: () => void = () => {},
+) {
   const request = {
     header: (name: string) => headers[name.toLowerCase()],
     method,
@@ -15,6 +22,8 @@ function makeContext(headers: Record<string, string>, method = 'GET', url = '/de
   };
   return {
     switchToHttp: () => ({ getRequest: () => request }),
+    getHandler: () => handler,
+    getClass: () => class {},
   } as unknown as ExecutionContext;
 }
 
@@ -31,7 +40,7 @@ describe('InternalAttestationGuard', () => {
       },
     } as unknown as ConfigService<AppConfig, true>;
     replayCache = new ReplayCacheService();
-    guard = new InternalAttestationGuard(config, replayCache);
+    guard = new InternalAttestationGuard(config, replayCache, new Reflector());
   });
 
   function sign(timestamp: string, nonce: string, method: string, url: string) {
@@ -111,5 +120,16 @@ describe('InternalAttestationGuard', () => {
       '/admin/users',
     );
     expect(() => guard.canActivate(ctx)).toThrow(UnauthorizedException);
+  });
+
+  it('allows a request with no attestation headers when the handler is marked @SkipInternalAttestation()', () => {
+    class HealthController {
+      @SkipInternalAttestation()
+      check(): void {}
+    }
+    // Metadata is attached to the prototype method itself — a bound copy
+    // wouldn't carry it, so pass the unbound reference the guard reads.
+    const ctx = makeContext({}, 'GET', '/health', HealthController.prototype.check);
+    expect(guard.canActivate(ctx)).toBe(true);
   });
 });
