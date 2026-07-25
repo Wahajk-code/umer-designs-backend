@@ -162,7 +162,7 @@ describe('PaymentLinksService', () => {
 
       expect(stripe.createCheckoutSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          amountCents: 78000,
+          lineItems: [expect.objectContaining({ amountCents: 78000 })],
           metadata: { kind: 'payment_link', recordId: 'link-1' },
         }),
       );

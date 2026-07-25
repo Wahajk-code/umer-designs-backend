@@ -8,7 +8,7 @@ import { DomainEvent } from '@/common/events/domain-events';
 describe('ReferralsService', () => {
   let service: ReferralsService;
   let prisma: {
-    user: { findUniqueOrThrow: jest.Mock };
+    user: { findUniqueOrThrow: jest.Mock; update: jest.Mock };
     referral: {
       create: jest.Mock;
       findMany: jest.Mock;
@@ -25,7 +25,7 @@ describe('ReferralsService', () => {
 
   beforeEach(() => {
     prisma = {
-      user: { findUniqueOrThrow: jest.fn() },
+      user: { findUniqueOrThrow: jest.fn(), update: jest.fn() },
       referral: {
         create: jest.fn(),
         findMany: jest.fn(),
@@ -103,11 +103,34 @@ describe('ReferralsService', () => {
         expect.objectContaining({ referralId: 'r1', referrerId: 'referrer-1', rewardCents: 3000 }),
       );
     });
+
+    it('credits the referrer’s spendable balance by the reward amount', async () => {
+      prisma.referral.findUnique.mockResolvedValue({
+        id: 'r1',
+        rewardStatus: ReferralStatus.PENDING,
+        referrerId: 'referrer-1',
+        rewardCents: 3000,
+        referred: { email: 'referred@example.com' },
+      });
+      prisma.order.count.mockResolvedValue(1);
+      prisma.referral.update.mockResolvedValue({});
+      prisma.user.update.mockResolvedValue({});
+
+      await service.checkAndRewardFirstPurchase('u1');
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'referrer-1' },
+        data: { creditBalanceCents: { increment: 3000 } },
+      });
+    });
   });
 
   describe('getMySummary', () => {
     it('sums only REWARDED referrals toward totalEarnedCents', async () => {
-      prisma.user.findUniqueOrThrow.mockResolvedValue({ referralCode: 'SOFIA-ABC123' });
+      prisma.user.findUniqueOrThrow.mockResolvedValue({
+        referralCode: 'SOFIA-ABC123',
+        creditBalanceCents: 1500,
+      });
       prisma.referral.findMany.mockResolvedValue([
         {
           rewardStatus: ReferralStatus.REWARDED,
@@ -128,6 +151,7 @@ describe('ReferralsService', () => {
       expect(summary.totalEarnedCents).toBe(3000);
       expect(summary.totalReferred).toBe(2);
       expect(summary.referralCode).toBe('SOFIA-ABC123');
+      expect(summary.creditBalanceCents).toBe(1500);
       expect(summary.referrals[0].referredEmail).not.toBe('a@example.com'); // masked
     });
   });

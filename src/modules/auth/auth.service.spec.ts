@@ -11,10 +11,18 @@ import { AppConfig } from '@/config/configuration';
 describe('AuthService', () => {
   let service: AuthService;
   let usersService: jest.Mocked<
-    Pick<UsersService, 'findByEmail' | 'findByReferralCode' | 'create'>
+    Pick<
+      UsersService,
+      | 'findByEmail'
+      | 'findByReferralCode'
+      | 'create'
+      | 'findById'
+      | 'updateEmail'
+      | 'updatePasswordHash'
+    >
   >;
   let tokensService: jest.Mocked<
-    Pick<TokensService, 'issueNewSession' | 'rotate' | 'revokeFamilyByToken'>
+    Pick<TokensService, 'issueNewSession' | 'rotate' | 'revokeFamilyByToken' | 'revokeAllForUser'>
   >;
   let referralsService: jest.Mocked<Pick<ReferralsService, 'tagSignup'>>;
   let config: ConfigService<AppConfig, true>;
@@ -24,6 +32,9 @@ describe('AuthService', () => {
       findByEmail: jest.fn(),
       findByReferralCode: jest.fn(),
       create: jest.fn(),
+      findById: jest.fn(),
+      updateEmail: jest.fn(),
+      updatePasswordHash: jest.fn(),
     };
     tokensService = {
       issueNewSession: jest.fn().mockResolvedValue({
@@ -33,6 +44,7 @@ describe('AuthService', () => {
       }),
       rotate: jest.fn(),
       revokeFamilyByToken: jest.fn(),
+      revokeAllForUser: jest.fn(),
     };
     referralsService = { tagSignup: jest.fn().mockResolvedValue(undefined) };
     config = { get: () => 4 } as unknown as ConfigService<AppConfig, true>; // low salt rounds for fast tests
@@ -68,6 +80,8 @@ describe('AuthService', () => {
         lastName: input.lastName,
         role: Role.USER,
         referralCode: 'ABC-123',
+        creditBalanceCents: 0,
+        deletedAt: null,
         referredById: input.referredById ?? null,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -98,6 +112,8 @@ describe('AuthService', () => {
         lastName: input.lastName,
         role: Role.USER,
         referralCode: 'XYZ-999',
+        creditBalanceCents: 0,
+        deletedAt: null,
         referredById: input.referredById ?? null,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -127,6 +143,8 @@ describe('AuthService', () => {
         lastName: input.lastName,
         role: Role.USER,
         referralCode: 'NOP-000',
+        creditBalanceCents: 0,
+        deletedAt: null,
         referredById: null,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -177,6 +195,65 @@ describe('AuthService', () => {
       const result = await service.login({ email: 'a@example.com', password: 'CorrectPassword1' });
       expect(result.tokens.accessToken).toBe('access');
       expect(tokensService.issueNewSession).toHaveBeenCalledWith('u1', 'a@example.com', Role.USER);
+    });
+  });
+
+  describe('changeEmail', () => {
+    it('rejects an incorrect current password', async () => {
+      const passwordHash = await bcrypt.hash('CorrectPassword1', 4);
+      usersService.findById.mockResolvedValue({ id: 'u1', passwordHash } as any);
+
+      await expect(
+        service.changeEmail('u1', {
+          newEmail: 'new@example.com',
+          currentPassword: 'WrongPassword1',
+        }),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(usersService.updateEmail).not.toHaveBeenCalled();
+    });
+
+    it('updates the email once the current password is verified', async () => {
+      const passwordHash = await bcrypt.hash('CorrectPassword1', 4);
+      usersService.findById.mockResolvedValue({ id: 'u1', passwordHash } as any);
+      usersService.updateEmail.mockResolvedValue({ id: 'u1', email: 'new@example.com' } as any);
+
+      const result = await service.changeEmail('u1', {
+        newEmail: 'new@example.com',
+        currentPassword: 'CorrectPassword1',
+      });
+
+      expect(usersService.updateEmail).toHaveBeenCalledWith('u1', 'new@example.com');
+      expect(result.email).toBe('new@example.com');
+    });
+  });
+
+  describe('changePassword', () => {
+    it('rejects an incorrect current password', async () => {
+      const passwordHash = await bcrypt.hash('CorrectPassword1', 4);
+      usersService.findById.mockResolvedValue({ id: 'u1', passwordHash } as any);
+
+      await expect(
+        service.changePassword('u1', {
+          currentPassword: 'WrongPassword1',
+          newPassword: 'NewPassword1',
+        }),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(usersService.updatePasswordHash).not.toHaveBeenCalled();
+      expect(tokensService.revokeAllForUser).not.toHaveBeenCalled();
+    });
+
+    it('hashes the new password and revokes every session once verified', async () => {
+      const passwordHash = await bcrypt.hash('CorrectPassword1', 4);
+      usersService.findById.mockResolvedValue({ id: 'u1', passwordHash } as any);
+
+      await service.changePassword('u1', {
+        currentPassword: 'CorrectPassword1',
+        newPassword: 'NewPassword1',
+      });
+
+      const newHash = usersService.updatePasswordHash.mock.calls[0][1];
+      expect(await bcrypt.compare('NewPassword1', newHash)).toBe(true);
+      expect(tokensService.revokeAllForUser).toHaveBeenCalledWith('u1');
     });
   });
 });

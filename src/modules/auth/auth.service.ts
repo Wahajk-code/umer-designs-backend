@@ -1,4 +1,9 @@
-import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcryptjs';
 import { UsersService } from '@/modules/users/users.service';
@@ -6,6 +11,8 @@ import { TokensService, IssuedTokens } from '@/modules/auth/tokens.service';
 import { ReferralsService } from '@/modules/referrals/referrals.service';
 import { RegisterDto } from '@/modules/auth/dto/register.dto';
 import { LoginDto } from '@/modules/auth/dto/login.dto';
+import { UpdateEmailDto } from '@/modules/auth/dto/update-email.dto';
+import { UpdatePasswordDto } from '@/modules/auth/dto/update-password.dto';
 import { AppConfig } from '@/config/configuration';
 import { sanitizeUser, SafeUser } from '@/common/utils/sanitize-user.util';
 
@@ -75,5 +82,38 @@ export class AuthService {
 
   async logout(rawRefreshToken: string): Promise<void> {
     await this.tokensService.revokeFamilyByToken(rawRefreshToken);
+  }
+
+  async changeEmail(userId: string, dto: UpdateEmailDto): Promise<SafeUser> {
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found.');
+    }
+
+    const passwordMatches = await bcrypt.compare(dto.currentPassword, user.passwordHash);
+    if (!passwordMatches) {
+      throw new UnauthorizedException('Current password is incorrect.');
+    }
+
+    const updated = await this.usersService.updateEmail(userId, dto.newEmail);
+    return sanitizeUser(updated);
+  }
+
+  /** Revokes every session on every device — the new password is only trustworthy once nothing old can still act as the user. */
+  async changePassword(userId: string, dto: UpdatePasswordDto): Promise<void> {
+    const user = await this.usersService.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found.');
+    }
+
+    const passwordMatches = await bcrypt.compare(dto.currentPassword, user.passwordHash);
+    if (!passwordMatches) {
+      throw new UnauthorizedException('Current password is incorrect.');
+    }
+
+    const saltRounds = this.config.get('bcryptSaltRounds', { infer: true });
+    const passwordHash = await bcrypt.hash(dto.newPassword, saltRounds);
+    await this.usersService.updatePasswordHash(userId, passwordHash);
+    await this.tokensService.revokeAllForUser(userId);
   }
 }

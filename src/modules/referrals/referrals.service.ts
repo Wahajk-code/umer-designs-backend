@@ -42,6 +42,8 @@ export class ReferralsService {
       referralCode: user.referralCode,
       totalReferred: referrals.length,
       totalEarnedCents,
+      /** The spendable balance right now — distinct from totalEarnedCents (lifetime), since credits get consumed at checkout. */
+      creditBalanceCents: user.creditBalanceCents,
       referrals: referrals.map((r) => ({
         referredEmail: maskEmail(r.referred.email),
         rewardStatus: r.rewardStatus,
@@ -71,10 +73,16 @@ export class ReferralsService {
       return;
     }
 
-    await this.prisma.referral.update({
-      where: { id: referral.id },
-      data: { rewardStatus: ReferralStatus.REWARDED, rewardedAt: new Date() },
-    });
+    await this.prisma.$transaction([
+      this.prisma.referral.update({
+        where: { id: referral.id },
+        data: { rewardStatus: ReferralStatus.REWARDED, rewardedAt: new Date() },
+      }),
+      this.prisma.user.update({
+        where: { id: referral.referrerId },
+        data: { creditBalanceCents: { increment: referral.rewardCents } },
+      }),
+    ]);
 
     const payload: ReferralRewardedPayload = {
       referralId: referral.id,

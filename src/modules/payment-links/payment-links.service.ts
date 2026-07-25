@@ -110,8 +110,7 @@ export class PaymentLinksService {
 
     const origin = this.config.get('corsAllowedOrigin', { infer: true });
     const session = await this.stripe.createCheckoutSession({
-      amountCents: link.amountCents,
-      productName: link.description,
+      lineItems: [{ name: link.description, amountCents: link.amountCents }],
       customerEmail: link.clientEmail,
       successUrl: `${origin}/pay/${rawToken}?paid=1`,
       cancelUrl: `${origin}/pay/${rawToken}?cancelled=1`,

@@ -7,16 +7,19 @@ import { PrismaService } from '@/modules/prisma/prisma.service';
 export class UsersService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /** Excludes soft-deleted accounts — a deleted user can't log in, be found by referral code, or act as anyone. */
   findByEmail(email: string): Promise<User | null> {
-    return this.prisma.user.findUnique({ where: { email: email.toLowerCase() } });
+    return this.prisma.user.findFirst({ where: { email: email.toLowerCase(), deletedAt: null } });
   }
 
   findById(id: string): Promise<User | null> {
-    return this.prisma.user.findUnique({ where: { id } });
+    return this.prisma.user.findFirst({ where: { id, deletedAt: null } });
   }
 
   findByReferralCode(code: string): Promise<User | null> {
-    return this.prisma.user.findUnique({ where: { referralCode: code.toUpperCase() } });
+    return this.prisma.user.findFirst({
+      where: { referralCode: code.toUpperCase(), deletedAt: null },
+    });
   }
 
   async create(input: {
@@ -50,16 +53,56 @@ export class UsersService {
     return this.prisma.user.update({ where: { id: userId }, data: { role } });
   }
 
+  async updateProfile(userId: string, firstName: string, lastName: string): Promise<User> {
+    return this.prisma.user.update({ where: { id: userId }, data: { firstName, lastName } });
+  }
+
+  async updateEmail(userId: string, newEmail: string): Promise<User> {
+    try {
+      return await this.prisma.user.update({
+        where: { id: userId },
+        data: { email: newEmail.toLowerCase() },
+      });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException('An account with this email already exists.');
+      }
+      throw err;
+    }
+  }
+
+  async updatePasswordHash(userId: string, passwordHash: string): Promise<void> {
+    await this.prisma.user.update({ where: { id: userId }, data: { passwordHash } });
+  }
+
   async list(page: number, pageSize: number): Promise<{ users: User[]; total: number }> {
     const [users, total] = await this.prisma.$transaction([
       this.prisma.user.findMany({
+        where: { deletedAt: null },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * pageSize,
         take: pageSize,
       }),
-      this.prisma.user.count(),
+      this.prisma.user.count({ where: { deletedAt: null } }),
     ]);
     return { users, total };
+  }
+
+  /**
+   * Soft delete: preserves the row (and every order/modification/referral
+   * that references it) for audit/history, but the account can never log in
+   * again and disappears from admin listings. Also revokes every session —
+   * done here via a direct Prisma call rather than TokensService, to avoid
+   * a circular module dependency (AuthModule already imports UsersModule).
+   */
+  async softDelete(userId: string): Promise<void> {
+    await this.prisma.$transaction([
+      this.prisma.user.update({ where: { id: userId }, data: { deletedAt: new Date() } }),
+      this.prisma.refreshToken.updateMany({
+        where: { userId, revoked: false },
+        data: { revoked: true },
+      }),
+    ]);
   }
 
   async regenerateReferralCode(userId: string): Promise<User> {

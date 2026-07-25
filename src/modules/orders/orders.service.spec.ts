@@ -12,11 +12,13 @@ describe('OrdersService', () => {
   let service: OrdersService;
   let prisma: {
     design: { findUnique: jest.Mock };
+    user: { findUniqueOrThrow: jest.Mock; update: jest.Mock };
     order: {
       findFirst: jest.Mock;
       create: jest.Mock;
       update: jest.Mock;
       findUnique: jest.Mock;
+      findUniqueOrThrow: jest.Mock;
       findMany: jest.Mock;
       count: jest.Mock;
     };
@@ -39,16 +41,29 @@ describe('OrdersService', () => {
   beforeEach(() => {
     prisma = {
       design: { findUnique: jest.fn() },
+      user: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({ id: 'u1', creditBalanceCents: 0 }),
+        update: jest.fn().mockResolvedValue({}),
+      },
       order: {
         findFirst: jest.fn(),
         create: jest.fn(),
         update: jest.fn(),
         findUnique: jest.fn(),
+        findUniqueOrThrow: jest.fn(),
         findMany: jest.fn(),
         count: jest.fn(),
       },
       designFile: { findFirst: jest.fn() },
-      $transaction: jest.fn((ops) => Promise.all(ops)),
+      // Supports both the array form (`$transaction([...])`) and the
+      // interactive callback form (`$transaction(async (tx) => ...)`) — the
+      // callback is just invoked with this same mock object standing in for `tx`.
+      $transaction: jest.fn((opsOrFn) => {
+        if (typeof opsOrFn === 'function') {
+          return opsOrFn(prisma);
+        }
+        return Promise.all(opsOrFn);
+      }),
     };
     stripe = {
       createCheckoutSession: jest
@@ -96,7 +111,7 @@ describe('OrdersService', () => {
       ).rejects.toThrow(ConflictException);
     });
 
-    it('creates a new order + Stripe session on first purchase attempt', async () => {
+    it('creates a new order + Stripe session on first purchase attempt (no credit balance)', async () => {
       prisma.design.findUnique.mockResolvedValue(design);
       prisma.order.findFirst.mockResolvedValue(null);
       prisma.order.create.mockResolvedValue({ id: 'order-1' });
@@ -108,6 +123,7 @@ describe('OrdersService', () => {
           userId: 'u1',
           designId: 'design-1',
           amountCents: 145000,
+          creditAppliedCents: 0,
           status: OrderStatus.PENDING,
         },
       });
@@ -120,14 +136,68 @@ describe('OrdersService', () => {
     it('reuses the same order row for a retried PENDING purchase (no duplicate order rows)', async () => {
       prisma.design.findUnique.mockResolvedValue(design);
       prisma.order.findFirst.mockResolvedValue({ id: 'order-1', status: OrderStatus.PENDING });
+      prisma.order.update.mockResolvedValue({ id: 'order-1' });
 
       await service.createCheckoutSession('u1', 'a@example.com', 'design-1');
 
       expect(prisma.order.create).not.toHaveBeenCalled();
       expect(prisma.order.update).toHaveBeenCalledWith({
         where: { id: 'order-1' },
-        data: { stripeCheckoutSessionId: 'cs_test_1' },
+        data: { amountCents: 145000, creditAppliedCents: 0 },
       });
+    });
+
+    it('applies an available credit balance to reduce the amount charged', async () => {
+      prisma.design.findUnique.mockResolvedValue(design);
+      prisma.user.findUniqueOrThrow.mockResolvedValue({ id: 'u1', creditBalanceCents: 5000 });
+      prisma.order.findFirst.mockResolvedValue(null);
+      prisma.order.create.mockResolvedValue({ id: 'order-1' });
+
+      const result = await service.createCheckoutSession('u1', 'a@example.com', 'design-1');
+
+      expect(prisma.order.create).toHaveBeenCalledWith({
+        data: {
+          userId: 'u1',
+          designId: 'design-1',
+          amountCents: 140000,
+          creditAppliedCents: 5000,
+          status: OrderStatus.PENDING,
+        },
+      });
+      expect(stripe.createCheckoutSession).toHaveBeenCalledWith(
+        expect.objectContaining({ lineItems: [expect.objectContaining({ amountCents: 140000 })] }),
+      );
+      expect(result.checkoutUrl).toBe('https://checkout.stripe.com/cs_test_1');
+    });
+
+    it('skips Stripe entirely and marks the order paid when credit balance fully covers the price', async () => {
+      prisma.design.findUnique.mockResolvedValue(design);
+      prisma.user.findUniqueOrThrow.mockResolvedValue({ id: 'u1', creditBalanceCents: 200000 });
+      prisma.order.findFirst.mockResolvedValue(null);
+      prisma.order.create.mockResolvedValue({ id: 'order-1' });
+      prisma.order.findUniqueOrThrow.mockResolvedValue({
+        id: 'order-1',
+        userId: 'u1',
+        designId: 'design-1',
+        design,
+      });
+
+      const result = await service.createCheckoutSession('u1', 'a@example.com', 'design-1');
+
+      expect(stripe.createCheckoutSession).not.toHaveBeenCalled();
+      expect(result.checkoutUrl).toBeNull();
+      expect(prisma.order.update).toHaveBeenCalledWith({
+        where: { id: 'order-1' },
+        data: expect.objectContaining({ status: OrderStatus.PAID }),
+      });
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u1' },
+        data: { creditBalanceCents: { decrement: 145000 } },
+      });
+      expect(events.emit).toHaveBeenCalledWith(
+        DomainEvent.ORDER_PAID,
+        expect.objectContaining({ orderId: 'order-1', userId: 'u1' }),
+      );
     });
   });
 
@@ -138,6 +208,7 @@ describe('OrdersService', () => {
         userId: 'u1',
         designId: 'design-1',
         amountCents: 145000,
+        creditAppliedCents: 0,
         status: OrderStatus.PENDING,
         design: { title: 'The Meridian' },
       });
@@ -155,6 +226,26 @@ describe('OrdersService', () => {
         DomainEvent.ORDER_PAID,
         expect.objectContaining({ orderId: 'order-1', userId: 'u1' }),
       );
+    });
+
+    it('deducts any credit that was applied once payment is confirmed', async () => {
+      prisma.order.findUnique.mockResolvedValue({
+        id: 'order-1',
+        userId: 'u1',
+        designId: 'design-1',
+        amountCents: 140000,
+        creditAppliedCents: 5000,
+        status: OrderStatus.PENDING,
+        design: { title: 'The Meridian' },
+      });
+      prisma.user.findUniqueOrThrow.mockResolvedValue({ id: 'u1', creditBalanceCents: 5000 });
+
+      await service.handleCheckoutCompleted('order-1', 'pi_123');
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: 'u1' },
+        data: { creditBalanceCents: { decrement: 5000 } },
+      });
     });
 
     it('is a no-op for an order that is already PAID (idempotent)', async () => {

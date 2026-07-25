@@ -6,12 +6,14 @@ describe('UsersService', () => {
   let prisma: {
     user: {
       findUnique: jest.Mock;
+      findFirst: jest.Mock;
       create: jest.Mock;
       update: jest.Mock;
       findUniqueOrThrow: jest.Mock;
       findMany: jest.Mock;
       count: jest.Mock;
     };
+    refreshToken: { updateMany: jest.Mock };
     $transaction: jest.Mock;
   };
 
@@ -19,12 +21,14 @@ describe('UsersService', () => {
     prisma = {
       user: {
         findUnique: jest.fn(),
+        findFirst: jest.fn(),
         create: jest.fn(),
         update: jest.fn(),
         findUniqueOrThrow: jest.fn(),
         findMany: jest.fn(),
         count: jest.fn(),
       },
+      refreshToken: { updateMany: jest.fn() },
       $transaction: jest.fn((ops) => Promise.all(ops)),
     };
     service = new UsersService(prisma as any);
@@ -60,10 +64,12 @@ describe('UsersService', () => {
     expect(user.referralCode).toMatch(/^UMER-[0-9A-F]{6}$/);
   });
 
-  it('lowercases email on lookup', async () => {
-    prisma.user.findUnique.mockResolvedValue(null);
+  it('lowercases email on lookup and excludes soft-deleted accounts', async () => {
+    prisma.user.findFirst.mockResolvedValue(null);
     await service.findByEmail('Foo@Example.com');
-    expect(prisma.user.findUnique).toHaveBeenCalledWith({ where: { email: 'foo@example.com' } });
+    expect(prisma.user.findFirst).toHaveBeenCalledWith({
+      where: { email: 'foo@example.com', deletedAt: null },
+    });
   });
 
   it('promotes a user to a new role', async () => {
@@ -87,5 +93,19 @@ describe('UsersService', () => {
     );
     expect(result.total).toBe(42);
     expect(result.users).toHaveLength(2);
+  });
+
+  it('soft-deletes a user and revokes every refresh token in one transaction', async () => {
+    await service.softDelete('u1');
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(prisma.user.update).toHaveBeenCalledWith({
+      where: { id: 'u1' },
+      data: { deletedAt: expect.any(Date) },
+    });
+    expect(prisma.refreshToken.updateMany).toHaveBeenCalledWith({
+      where: { userId: 'u1', revoked: false },
+      data: { revoked: true },
+    });
   });
 });

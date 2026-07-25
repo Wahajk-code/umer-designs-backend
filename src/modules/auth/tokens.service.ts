@@ -94,6 +94,14 @@ export class TokensService {
     });
   }
 
+  /** Every session, every device — called on password change so a stolen password stops working everywhere immediately. */
+  async revokeAllForUser(userId: string): Promise<void> {
+    await this.prisma.refreshToken.updateMany({
+      where: { userId, revoked: false },
+      data: { revoked: true },
+    });
+  }
+
   private async issueTokenPairForFamily(
     userId: string,
     email: string,

@@ -27,8 +27,7 @@ describe('StripeService', () => {
     const service = new StripeService(makeConfig(''));
     await expect(
       service.createCheckoutSession({
-        amountCents: 1000,
-        productName: 'Test',
+        lineItems: [{ name: 'Test', amountCents: 1000 }],
         successUrl: 'https://example.com/success',
         cancelUrl: 'https://example.com/cancel',
         customerEmail: 'a@example.com',

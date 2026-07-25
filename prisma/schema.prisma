@@ -76,28 +76,30 @@ enum NotificationType {
 // ─────────────────────────────────────────────────────────────────────────
 
 model User {
-  id            String   @id @default(uuid())
-  email         String   @unique
-  passwordHash  String   @map("password_hash")
-  firstName     String   @map("first_name")
-  lastName      String   @map("last_name")
-  role          Role     @default(USER)
-  referralCode  String   @unique @map("referral_code")
-  referredById  String?  @map("referred_by_id")
-  referredBy    User?    @relation("Referrals", fields: [referredById], references: [id], onDelete: SetNull)
-  referredUsers User[]   @relation("Referrals")
-  createdAt     DateTime @default(now()) @map("created_at")
-  updatedAt     DateTime @updatedAt @map("updated_at")
+  id                 String    @id @default(uuid())
+  email              String    @unique
+  passwordHash       String    @map("password_hash")
+  firstName          String    @map("first_name")
+  lastName           String    @map("last_name")
+  role               Role      @default(USER)
+  referralCode       String    @unique @map("referral_code")
+  creditBalanceCents Int       @default(0) @map("credit_balance_cents")
+  deletedAt          DateTime? @map("deleted_at")
+  referredById       String?   @map("referred_by_id")
+  referredBy         User?     @relation("Referrals", fields: [referredById], references: [id], onDelete: SetNull)
+  referredUsers      User[]    @relation("Referrals")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
 
   refreshTokens        RefreshToken[]
   orders               Order[]
   modifications        Modification[]
   meetings             Meeting[]
   notifications        Notification[]
-  paymentLinksCreated  PaymentLink[]        @relation("PaymentLinksCreatedByAdmin")
-  paymentLinksReceived PaymentLink[]        @relation("PaymentLinksForClient")
-  referralsAsReferrer  Referral[]           @relation("ReferrerRecord")
-  referralAsReferred   Referral?            @relation("ReferredRecord")
+  paymentLinksCreated  PaymentLink[]       @relation("PaymentLinksCreatedByAdmin")
+  paymentLinksReceived PaymentLink[]       @relation("PaymentLinksForClient")
+  referralsAsReferrer  Referral[]          @relation("ReferrerRecord")
+  referralAsReferred   Referral?           @relation("ReferredRecord")
   modificationEvents   ModificationEvent[]
 
   @@map("users")
@@ -172,13 +174,18 @@ model Order {
   designId                String      @map("design_id")
   design                  Design      @relation(fields: [designId], references: [id], onDelete: Restrict)
   amountCents             Int         @map("amount_cents")
+  creditAppliedCents      Int         @default(0) @map("credit_applied_cents")
   status                  OrderStatus @default(PENDING)
-  stripeCheckoutSessionId String?     @unique @map("stripe_checkout_session_id")
-  stripePaymentIntentId   String?     @unique @map("stripe_payment_intent_id")
+  // Not @unique: a cart checkout pays for several designs in one Stripe
+  // Checkout Session, so multiple Order rows legitimately share one
+  // session/payment-intent id.
+  stripeCheckoutSessionId String?     @map("stripe_checkout_session_id")
+  stripePaymentIntentId   String?     @map("stripe_payment_intent_id")
   paidAt                  DateTime?   @map("paid_at")
   createdAt               DateTime    @default(now()) @map("created_at")
   updatedAt               DateTime    @updatedAt @map("updated_at")
 
+  @@index([stripeCheckoutSessionId])
   @@map("orders")
 }
 
@@ -225,10 +232,10 @@ model Modification {
   createdAt               DateTime           @default(now()) @map("created_at")
   updatedAt               DateTime           @updatedAt @map("updated_at")
 
-  selectedOptions    ModificationSelectedOption[]
-  events             ModificationEvent[]
-  meetings           Meeting[]
-  files              ModificationFile[]
+  selectedOptions ModificationSelectedOption[]
+  events          ModificationEvent[]
+  meetings        Meeting[]
+  files           ModificationFile[]
 
   @@map("modifications")
 }

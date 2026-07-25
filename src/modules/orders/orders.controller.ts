@@ -4,6 +4,7 @@ import { Throttle } from '@nestjs/throttler';
 import { Order } from '@prisma/client';
 import { OrdersService } from '@/modules/orders/orders.service';
 import { CreateCheckoutSessionDto } from '@/modules/orders/dto/create-checkout-session.dto';
+import { CreateCartCheckoutSessionDto } from '@/modules/orders/dto/create-cart-checkout-session.dto';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 
@@ -18,8 +19,17 @@ export class OrdersController {
   createCheckoutSession(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateCheckoutSessionDto,
-  ): Promise<{ checkoutUrl: string }> {
+  ): Promise<{ checkoutUrl: string | null }> {
     return this.ordersService.createCheckoutSession(user.sub, user.email, dto.designId);
+  }
+
+  @Post('checkout-cart')
+  @Throttle({ payment: {} })
+  createCartCheckoutSession(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateCartCheckoutSessionDto,
+  ): Promise<{ checkoutUrl: string | null }> {
+    return this.ordersService.createCartCheckoutSession(user.sub, user.email, dto.designIds);
   }
 
   @Get('me')

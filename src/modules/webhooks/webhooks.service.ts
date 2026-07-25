@@ -50,6 +50,18 @@ export class WebhooksService {
         await this.ordersService.handleCheckoutCompleted(recordId, dto.paymentIntentId);
         break;
       }
+      case 'cart_order': {
+        const recordIds = dto.metadata?.recordIds;
+        if (!recordIds) {
+          this.logger.warn(`cart_order event ${dto.eventId} missing metadata.recordIds`);
+          return;
+        }
+        await this.ordersService.handleCartCheckoutCompleted(
+          recordIds.split(',').filter(Boolean),
+          dto.paymentIntentId,
+        );
+        break;
+      }
       case 'modification':
         await this.modificationsService.handleCheckoutCompleted(
           dto.metadata ?? {},

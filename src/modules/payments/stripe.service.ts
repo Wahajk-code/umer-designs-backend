@@ -3,9 +3,13 @@ import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
 import { AppConfig } from '@/config/configuration';
 
-export interface CreateCheckoutSessionInput {
+export interface CheckoutLineItem {
+  name: string;
   amountCents: number;
-  productName: string;
+}
+
+export interface CreateCheckoutSessionInput {
+  lineItems: CheckoutLineItem[];
   successUrl: string;
   cancelUrl: string;
   customerEmail: string;
@@ -48,16 +52,14 @@ export class StripeService {
         mode: 'payment',
         payment_method_types: ['card'],
         customer_email: input.customerEmail,
-        line_items: [
-          {
-            quantity: 1,
-            price_data: {
-              currency: 'usd',
-              unit_amount: input.amountCents,
-              product_data: { name: input.productName },
-            },
+        line_items: input.lineItems.map((item) => ({
+          quantity: 1,
+          price_data: {
+            currency: 'usd',
+            unit_amount: item.amountCents,
+            product_data: { name: item.name },
           },
-        ],
+        })),
         success_url: input.successUrl,
         cancel_url: input.cancelUrl,
         metadata: input.metadata,

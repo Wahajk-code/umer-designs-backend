@@ -148,7 +148,7 @@ describe('ModificationsService', () => {
 
       expect(stripe.createCheckoutSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          amountCents: 145000 + 50000 + 35000,
+          lineItems: [expect.objectContaining({ amountCents: 145000 + 50000 + 35000 })],
           metadata: expect.objectContaining({
             kind: 'modification',
             userId: 'u1',

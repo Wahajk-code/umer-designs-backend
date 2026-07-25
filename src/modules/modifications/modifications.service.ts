@@ -93,8 +93,7 @@ export class ModificationsService {
 
     const origin = this.config.get('corsAllowedOrigin', { infer: true });
     const session = await this.stripe.createCheckoutSession({
-      amountCents: totalAmountCents,
-      productName: `${design.title} — modification`,
+      lineItems: [{ name: `${design.title} — modification`, amountCents: totalAmountCents }],
       customerEmail: userEmail,
       successUrl: `${origin}/dashboard?modification=submitted`,
       cancelUrl: `${origin}/designs/${design.slug}?modification=cancelled`,
