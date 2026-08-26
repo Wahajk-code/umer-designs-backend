@@ -10,6 +10,9 @@ import { slugify } from '@/common/utils/slugify.util';
 
 type DesignWithFiles = Design & { files: DesignFile[] };
 
+type PublicAddOn = { id: string; label: string; description: string | null; addedCostCents: number };
+type DesignWithFilesAndAddOns = DesignWithFiles & { addOns: PublicAddOn[] };
+
 @Injectable()
 export class DesignsService {
   constructor(
@@ -31,10 +34,17 @@ export class DesignsService {
     return { designs, total };
   }
 
-  async findPublishedBySlug(slug: string): Promise<DesignWithFiles> {
+  async findPublishedBySlug(slug: string): Promise<DesignWithFilesAndAddOns> {
     const design = await this.prisma.design.findUnique({
       where: { slug },
-      include: { files: true },
+      include: {
+        files: true,
+        addOns: {
+          where: { active: true },
+          orderBy: { addedCostCents: 'asc' },
+          select: { id: true, label: true, description: true, addedCostCents: true },
+        },
+      },
     });
     if (!design || design.status !== DesignStatus.PUBLISHED) {
       throw new NotFoundException('Design not found.');
@@ -122,6 +132,24 @@ export class DesignsService {
         format: dto.format,
       },
     });
+  }
+
+  /** Signed, expiring inline-preview URL for one of this design's uploaded image files — never exposes CAD/PDF originals, only image-type assets. */
+  async getFilePreviewUrl(designId: string, fileId: string): Promise<{ url: string }> {
+    const file = await this.prisma.designFile.findFirst({ where: { id: fileId, designId } });
+    if (!file) {
+      throw new NotFoundException('File not found.');
+    }
+    if (file.resourceType !== 'image') {
+      throw new ConflictException('Only image files can be previewed.');
+    }
+    return {
+      url: this.cloudinary.createSignedPreviewUrl(
+        file.cloudinaryPublicId,
+        file.resourceType,
+        file.format,
+      ),
+    };
   }
 
   async removeFile(designId: string, fileId: string): Promise<void> {

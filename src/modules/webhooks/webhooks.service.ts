@@ -47,7 +47,11 @@ export class WebhooksService {
           this.logger.warn(`design_order event ${dto.eventId} missing metadata.recordId`);
           return;
         }
-        await this.ordersService.handleCheckoutCompleted(recordId, dto.paymentIntentId);
+        await this.ordersService.handleCheckoutCompleted(
+          recordId,
+          dto.paymentIntentId,
+          dto.metadata?.addOnSelections,
+        );
         break;
       }
       case 'cart_order': {
@@ -59,6 +63,7 @@ export class WebhooksService {
         await this.ordersService.handleCartCheckoutCompleted(
           recordIds.split(',').filter(Boolean),
           dto.paymentIntentId,
+          dto.metadata?.addOnSelectionsByOrder,
         );
         break;
       }

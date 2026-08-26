@@ -41,7 +41,11 @@ describe('WebhooksService', () => {
       metadata: { kind: 'design_order', recordId: 'order-1' },
     });
 
-    expect(ordersService.handleCheckoutCompleted).toHaveBeenCalledWith('order-1', 'pi_1');
+    expect(ordersService.handleCheckoutCompleted).toHaveBeenCalledWith(
+      'order-1',
+      'pi_1',
+      undefined,
+    );
   });
 
   it('routes a checkout.session.completed modification event to ModificationsService', async () => {

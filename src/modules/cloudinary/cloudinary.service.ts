@@ -76,6 +76,23 @@ export class CloudinaryService {
     });
   }
 
+  /**
+   * Short-lived signed URL for inline viewing (no forced download) of an
+   * unpurchased file, e.g. an admin/pre-purchase preview thumbnail. Same
+   * signed-and-expiring mechanism as `createSignedDownloadUrl`, just without
+   * `attachment` — never a permanent public link either.
+   */
+  createSignedPreviewUrl(publicId: string, resourceType: string, format: string): string {
+    this.assertConfigured();
+    const expiresAt = Math.round(Date.now() / 1000) + this.signedUrlTtlSeconds;
+    return cloudinary.utils.private_download_url(publicId, format, {
+      resource_type: resourceType,
+      type: 'authenticated',
+      expires_at: expiresAt,
+      attachment: false,
+    });
+  }
+
   async deleteAsset(publicId: string, resourceType: string): Promise<void> {
     this.assertConfigured();
     await cloudinary.uploader.destroy(publicId, {

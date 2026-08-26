@@ -60,6 +60,14 @@ export class AdminDesignsController {
     return this.designsService.addFile(id, dto);
   }
 
+  @Get(':id/files/:fileId/preview-url')
+  getFilePreviewUrl(
+    @Param('id') id: string,
+    @Param('fileId') fileId: string,
+  ): Promise<{ url: string }> {
+    return this.designsService.getFilePreviewUrl(id, fileId);
+  }
+
   @Delete(':id/files/:fileId')
   @HttpCode(HttpStatus.NO_CONTENT)
   async removeFile(@Param('id') id: string, @Param('fileId') fileId: string): Promise<void> {

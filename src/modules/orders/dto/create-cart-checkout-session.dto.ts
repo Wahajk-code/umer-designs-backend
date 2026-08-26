@@ -1,9 +1,29 @@
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsUUID } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
+  IsOptional,
+  IsUUID,
+  ValidateNested,
+} from 'class-validator';
+
+export class CartCheckoutItemDto {
+  @IsUUID()
+  designId!: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @IsUUID('4', { each: true })
+  addOnIds?: string[];
+}
 
 export class CreateCartCheckoutSessionDto {
   @IsArray()
   @ArrayMinSize(1)
   @ArrayMaxSize(20)
-  @IsUUID('4', { each: true })
-  designIds!: string[];
+  @ValidateNested({ each: true })
+  @Type(() => CartCheckoutItemDto)
+  items!: CartCheckoutItemDto[];
 }

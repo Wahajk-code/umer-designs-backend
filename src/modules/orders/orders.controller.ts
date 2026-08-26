@@ -20,7 +20,12 @@ export class OrdersController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateCheckoutSessionDto,
   ): Promise<{ checkoutUrl: string | null }> {
-    return this.ordersService.createCheckoutSession(user.sub, user.email, dto.designId);
+    return this.ordersService.createCheckoutSession(
+      user.sub,
+      user.email,
+      dto.designId,
+      dto.addOnIds ?? [],
+    );
   }
 
   @Post('checkout-cart')
@@ -29,7 +34,7 @@ export class OrdersController {
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateCartCheckoutSessionDto,
   ): Promise<{ checkoutUrl: string | null }> {
-    return this.ordersService.createCartCheckoutSession(user.sub, user.email, dto.designIds);
+    return this.ordersService.createCartCheckoutSession(user.sub, user.email, dto.items);
   }
 
   @Get('me')

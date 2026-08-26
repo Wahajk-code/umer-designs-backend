@@ -12,6 +12,7 @@ describe('OrdersService', () => {
   let service: OrdersService;
   let prisma: {
     design: { findUnique: jest.Mock };
+    designAddOn: { findMany: jest.Mock };
     user: { findUniqueOrThrow: jest.Mock; update: jest.Mock };
     order: {
       findFirst: jest.Mock;
@@ -22,6 +23,7 @@ describe('OrdersService', () => {
       findMany: jest.Mock;
       count: jest.Mock;
     };
+    orderSelectedAddOn: { createMany: jest.Mock };
     designFile: { findFirst: jest.Mock };
     $transaction: jest.Mock;
   };
@@ -41,6 +43,7 @@ describe('OrdersService', () => {
   beforeEach(() => {
     prisma = {
       design: { findUnique: jest.fn() },
+      designAddOn: { findMany: jest.fn().mockResolvedValue([]) },
       user: {
         findUniqueOrThrow: jest.fn().mockResolvedValue({ id: 'u1', creditBalanceCents: 0 }),
         update: jest.fn().mockResolvedValue({}),
@@ -54,6 +57,7 @@ describe('OrdersService', () => {
         findMany: jest.fn(),
         count: jest.fn(),
       },
+      orderSelectedAddOn: { createMany: jest.fn().mockResolvedValue({ count: 0 }) },
       designFile: { findFirst: jest.fn() },
       // Supports both the array form (`$transaction([...])`) and the
       // interactive callback form (`$transaction(async (tx) => ...)`) — the
@@ -128,7 +132,9 @@ describe('OrdersService', () => {
         },
       });
       expect(stripe.createCheckoutSession).toHaveBeenCalledWith(
-        expect.objectContaining({ metadata: { kind: 'design_order', recordId: 'order-1' } }),
+        expect.objectContaining({
+          metadata: { kind: 'design_order', recordId: 'order-1', addOnSelections: '[]' },
+        }),
       );
       expect(result.checkoutUrl).toBe('https://checkout.stripe.com/cs_test_1');
     });
@@ -199,6 +205,61 @@ describe('OrdersService', () => {
         expect.objectContaining({ orderId: 'order-1', userId: 'u1' }),
       );
     });
+
+    it('adds the price of selected add-ons to the total and creates a line item per add-on', async () => {
+      prisma.design.findUnique.mockResolvedValue(design);
+      prisma.designAddOn.findMany.mockResolvedValue([
+        { id: 'addon-1', designId: 'design-1', label: 'Garage', addedCostCents: 8000, active: true },
+      ]);
+      prisma.order.findFirst.mockResolvedValue(null);
+      prisma.order.create.mockResolvedValue({ id: 'order-1' });
+
+      const result = await service.createCheckoutSession('u1', 'a@example.com', 'design-1', [
+        'addon-1',
+      ]);
+
+      expect(prisma.order.create).toHaveBeenCalledWith({
+        data: {
+          userId: 'u1',
+          designId: 'design-1',
+          amountCents: 153000,
+          creditAppliedCents: 0,
+          status: OrderStatus.PENDING,
+        },
+      });
+      expect(stripe.createCheckoutSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          lineItems: [
+            expect.objectContaining({ amountCents: 145000 }),
+            expect.objectContaining({ amountCents: 8000 }),
+          ],
+          metadata: expect.objectContaining({
+            addOnSelections: JSON.stringify([
+              { addOnId: 'addon-1', label: 'Garage', priceAtSelectionCents: 8000 },
+            ]),
+          }),
+        }),
+      );
+      expect(result.checkoutUrl).toBe('https://checkout.stripe.com/cs_test_1');
+    });
+
+    it('rejects an add-on id that does not belong to this design', async () => {
+      prisma.design.findUnique.mockResolvedValue(design);
+      prisma.designAddOn.findMany.mockResolvedValue([]);
+      await expect(
+        service.createCheckoutSession('u1', 'a@example.com', 'design-1', ['missing-addon']),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('rejects an add-on that is no longer active', async () => {
+      prisma.design.findUnique.mockResolvedValue(design);
+      prisma.designAddOn.findMany.mockResolvedValue([
+        { id: 'addon-1', designId: 'design-1', label: 'Garage', addedCostCents: 8000, active: false },
+      ]);
+      await expect(
+        service.createCheckoutSession('u1', 'a@example.com', 'design-1', ['addon-1']),
+      ).rejects.toThrow(ConflictException);
+    });
   });
 
   describe('handleCheckoutCompleted', () => {
@@ -253,6 +314,29 @@ describe('OrdersService', () => {
       await service.handleCheckoutCompleted('order-1', 'pi_123');
       expect(prisma.order.update).not.toHaveBeenCalled();
       expect(events.emit).not.toHaveBeenCalled();
+    });
+
+    it('creates OrderSelectedAddOn rows from the price snapshot carried in Stripe metadata', async () => {
+      prisma.order.findUnique.mockResolvedValue({
+        id: 'order-1',
+        userId: 'u1',
+        designId: 'design-1',
+        amountCents: 153000,
+        creditAppliedCents: 0,
+        status: OrderStatus.PENDING,
+        design: { title: 'The Meridian' },
+      });
+
+      await service.handleCheckoutCompleted(
+        'order-1',
+        'pi_123',
+        JSON.stringify([{ addOnId: 'addon-1', label: 'Garage', priceAtSelectionCents: 8000 }]),
+      );
+
+      expect(prisma.orderSelectedAddOn.createMany).toHaveBeenCalledWith({
+        data: [{ orderId: 'order-1', addOnId: 'addon-1', priceAtSelectionCents: 8000 }],
+        skipDuplicates: true,
+      });
     });
 
     it('is a no-op for an unknown order id (defensive, does not throw)', async () => {

@@ -9,10 +9,18 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { randomUUID } from 'crypto';
 import { Order, OrderStatus } from '@prisma/client';
 import { PrismaService } from '@/modules/prisma/prisma.service';
-import { StripeService } from '@/modules/payments/stripe.service';
+import { StripeService, CheckoutLineItem } from '@/modules/payments/stripe.service';
 import { CloudinaryService } from '@/modules/cloudinary/cloudinary.service';
 import { AppConfig } from '@/config/configuration';
 import { DomainEvent, OrderPaidPayload } from '@/common/events/domain-events';
+import { CartCheckoutItemDto } from '@/modules/orders/dto/create-cart-checkout-session.dto';
+
+/** Add-on price snapshot, taken at checkout-session-creation time — never re-priced later. */
+interface AddOnSelectionMeta {
+  addOnId: string;
+  label: string;
+  priceAtSelectionCents: number;
+}
 
 @Injectable()
 export class OrdersService {
@@ -28,6 +36,7 @@ export class OrdersService {
     userId: string,
     userEmail: string,
     designId: string,
+    addOnIds: string[] = [],
   ): Promise<{ checkoutUrl: string | null }> {
     const [design, user] = await Promise.all([
       this.prisma.design.findUnique({ where: { id: designId } }),
@@ -37,6 +46,10 @@ export class OrdersService {
       throw new NotFoundException('Design not found.');
     }
 
+    const selections = await this.resolveAddOnSelections(designId, addOnIds);
+    const addOnsTotalCents = selections.reduce((sum, s) => sum + s.priceAtSelectionCents, 0);
+    const totalPriceCents = design.basePriceCents + addOnsTotalCents;
+
     let order = await this.prisma.order.findFirst({ where: { userId, designId } });
 
     if (order?.status === OrderStatus.PAID) {
@@ -45,8 +58,8 @@ export class OrdersService {
 
     // Recomputed fresh on every attempt against the user's *current* balance —
     // never trust a stale reservation from an earlier, abandoned checkout.
-    const creditToApply = Math.min(user.creditBalanceCents, design.basePriceCents);
-    const amountDue = design.basePriceCents - creditToApply;
+    const creditToApply = Math.min(user.creditBalanceCents, totalPriceCents);
+    const amountDue = totalPriceCents - creditToApply;
 
     if (!order) {
       order = await this.prisma.order.create({
@@ -69,17 +82,23 @@ export class OrdersService {
     // actual balance deduction happens here too (not just a reservation)
     // since there's no webhook to wait for; this *is* the confirmed payment.
     if (amountDue === 0) {
-      await this.markPaidWithCredit(order.id, userId, creditToApply);
+      await this.markPaidWithCredit(order.id, userId, creditToApply, totalPriceCents, selections);
       return { checkoutUrl: null };
     }
 
+    const lineItems = this.buildLineItems(design.title, design.basePriceCents, selections, creditToApply);
+
     const origin = this.config.get('corsAllowedOrigin', { infer: true });
     const session = await this.stripe.createCheckoutSession({
-      lineItems: [{ name: design.title, amountCents: amountDue }],
+      lineItems,
       customerEmail: userEmail,
       successUrl: `${origin}/dashboard?purchased=1`,
       cancelUrl: `${origin}/designs/${design.slug}?checkout=cancelled`,
-      metadata: { kind: 'design_order', recordId: order.id },
+      metadata: {
+        kind: 'design_order',
+        recordId: order.id,
+        addOnSelections: JSON.stringify(selections),
+      },
       // Fresh key per attempt: never reuses a stale Stripe-cached response across separate checkout clicks,
       // while the single `order` row (looked up above) already prevents duplicate DB records / double ownership.
       idempotencyKey: `design-order-${order.id}-${randomUUID()}`,
@@ -104,9 +123,9 @@ export class OrdersService {
   async createCartCheckoutSession(
     userId: string,
     userEmail: string,
-    designIds: string[],
+    items: CartCheckoutItemDto[],
   ): Promise<{ checkoutUrl: string | null }> {
-    const uniqueIds = Array.from(new Set(designIds));
+    const uniqueIds = Array.from(new Set(items.map((i) => i.designId)));
     if (uniqueIds.length === 0) {
       throw new ConflictException('Your cart is empty.');
     }
@@ -126,11 +145,24 @@ export class OrdersService {
       throw new ConflictException('You already own one or more of these designs.');
     }
 
+    const designsById = new Map(designs.map((d) => [d.id, d]));
+    const cartPlans = await Promise.all(
+      Array.from(uniqueIds).map(async (designId) => {
+        const design = designsById.get(designId)!;
+        const selections = await this.resolveAddOnSelections(
+          designId,
+          items.find((i) => i.designId === designId)?.addOnIds ?? [],
+        );
+        const addOnsTotalCents = selections.reduce((sum, s) => sum + s.priceAtSelectionCents, 0);
+        return { design, selections, totalPriceCents: design.basePriceCents + addOnsTotalCents };
+      }),
+    );
+
     let remainingCredit = user.creditBalanceCents;
-    const plans = designs.map((design) => {
-      const creditApplied = Math.min(remainingCredit, design.basePriceCents);
+    const plans = cartPlans.map((p) => {
+      const creditApplied = Math.min(remainingCredit, p.totalPriceCents);
       remainingCredit -= creditApplied;
-      return { design, creditApplied, amountDue: design.basePriceCents - creditApplied };
+      return { ...p, creditApplied, amountDue: p.totalPriceCents - creditApplied };
     });
 
     const orders: Order[] = [];
@@ -160,20 +192,40 @@ export class OrdersService {
     if (totalDue === 0) {
       for (const order of orders) {
         const plan = plans.find((p) => p.design.id === order.designId)!;
-        await this.markPaidWithCredit(order.id, userId, plan.creditApplied);
+        await this.markPaidWithCredit(
+          order.id,
+          userId,
+          plan.creditApplied,
+          plan.totalPriceCents,
+          plan.selections,
+        );
       }
       return { checkoutUrl: null };
     }
 
+    const lineItems = plans.flatMap((p) =>
+      this.buildLineItems(p.design.title, p.design.basePriceCents, p.selections, p.creditApplied),
+    );
+
+    const addOnSelectionsByOrder: Record<string, AddOnSelectionMeta[]> = {};
+    for (const order of orders) {
+      const plan = plans.find((p) => p.design.id === order.designId)!;
+      if (plan.selections.length > 0) {
+        addOnSelectionsByOrder[order.id] = plan.selections;
+      }
+    }
+
     const origin = this.config.get('corsAllowedOrigin', { infer: true });
     const session = await this.stripe.createCheckoutSession({
-      lineItems: plans
-        .filter((p) => p.amountDue > 0)
-        .map((p) => ({ name: p.design.title, amountCents: p.amountDue })),
+      lineItems,
       customerEmail: userEmail,
       successUrl: `${origin}/dashboard?purchased=1`,
       cancelUrl: `${origin}/designs?checkout=cancelled`,
-      metadata: { kind: 'cart_order', recordIds: orders.map((o) => o.id).join(',') },
+      metadata: {
+        kind: 'cart_order',
+        recordIds: orders.map((o) => o.id).join(','),
+        addOnSelectionsByOrder: JSON.stringify(addOnSelectionsByOrder),
+      },
       idempotencyKey: `cart-order-${userId}-${randomUUID()}`,
     });
 
@@ -188,10 +240,73 @@ export class OrdersService {
     return { checkoutUrl: session.url };
   }
 
+  /** Validates the requested add-on ids belong to this design and are active; snapshots their current price. */
+  private async resolveAddOnSelections(
+    designId: string,
+    addOnIds: string[],
+  ): Promise<AddOnSelectionMeta[]> {
+    const uniqueIds = Array.from(new Set(addOnIds));
+    if (uniqueIds.length === 0) {
+      return [];
+    }
+
+    const addOns = await this.prisma.designAddOn.findMany({
+      where: { id: { in: uniqueIds }, designId },
+    });
+    const foundIds = new Set(addOns.map((a) => a.id));
+    const missing = uniqueIds.filter((id) => !foundIds.has(id));
+    if (missing.length > 0) {
+      throw new NotFoundException(`Unknown add-on(s) for this design: ${missing.join(', ')}`);
+    }
+    const inactive = addOns.filter((a) => !a.active);
+    if (inactive.length > 0) {
+      throw new ConflictException(
+        `These add-ons are no longer available: ${inactive.map((a) => a.label).join(', ')}`,
+      );
+    }
+
+    return addOns.map((a) => ({
+      addOnId: a.id,
+      label: a.label,
+      priceAtSelectionCents: a.addedCostCents,
+    }));
+  }
+
+  /** Applies credit to the base plan first, then to add-ons in order; drops any resulting zero-amount line items. */
+  private buildLineItems(
+    designTitle: string,
+    basePriceCents: number,
+    selections: AddOnSelectionMeta[],
+    creditToApply: number,
+  ): CheckoutLineItem[] {
+    let remainingCredit = creditToApply;
+    const items: CheckoutLineItem[] = [];
+
+    const baseCreditApplied = Math.min(remainingCredit, basePriceCents);
+    remainingCredit -= baseCreditApplied;
+    const baseAmountDue = basePriceCents - baseCreditApplied;
+    if (baseAmountDue > 0) {
+      items.push({ name: designTitle, amountCents: baseAmountDue });
+    }
+
+    for (const selection of selections) {
+      const creditApplied = Math.min(remainingCredit, selection.priceAtSelectionCents);
+      remainingCredit -= creditApplied;
+      const amountDue = selection.priceAtSelectionCents - creditApplied;
+      if (amountDue > 0) {
+        items.push({ name: `${designTitle} — ${selection.label}`, amountCents: amountDue });
+      }
+    }
+
+    return items;
+  }
+
   private async markPaidWithCredit(
     orderId: string,
     userId: string,
     creditAppliedCents: number,
+    totalPriceCents: number,
+    selections: AddOnSelectionMeta[] = [],
   ): Promise<void> {
     const order = await this.prisma.order.findUniqueOrThrow({
       where: { id: orderId },
@@ -203,6 +318,16 @@ export class OrdersService {
         where: { id: orderId },
         data: { status: OrderStatus.PAID, paidAt: new Date() },
       });
+      if (selections.length > 0) {
+        await tx.orderSelectedAddOn.createMany({
+          data: selections.map((s) => ({
+            orderId,
+            addOnId: s.addOnId,
+            priceAtSelectionCents: s.priceAtSelectionCents,
+          })),
+          skipDuplicates: true,
+        });
+      }
       // Clamp at 0 rather than trusting the reserved amount blindly — guards
       // against a rare double-spend race (two concurrent checkouts both
       // reserving against the same balance before either settles).
@@ -219,7 +344,7 @@ export class OrdersService {
       userId: order.userId,
       designId: order.designId,
       designTitle: order.design.title,
-      amountCents: order.design.basePriceCents,
+      amountCents: totalPriceCents,
     };
     this.events.emit(DomainEvent.ORDER_PAID, payload);
   }
@@ -228,23 +353,32 @@ export class OrdersService {
   async handleCheckoutCompleted(
     orderId: string,
     stripePaymentIntentId: string | undefined,
+    addOnSelectionsJson?: string,
   ): Promise<void> {
-    await this.settleOrder(orderId, stripePaymentIntentId);
+    const selections: AddOnSelectionMeta[] = addOnSelectionsJson
+      ? JSON.parse(addOnSelectionsJson)
+      : [];
+    await this.settleOrder(orderId, stripePaymentIntentId, selections);
   }
 
   /** Cart checkouts share one payment-intent across several orders; settle each independently. */
   async handleCartCheckoutCompleted(
     orderIds: string[],
     stripePaymentIntentId: string | undefined,
+    addOnSelectionsByOrderJson?: string,
   ): Promise<void> {
+    const addOnSelectionsByOrder: Record<string, AddOnSelectionMeta[]> = addOnSelectionsByOrderJson
+      ? JSON.parse(addOnSelectionsByOrderJson)
+      : {};
     for (const orderId of orderIds) {
-      await this.settleOrder(orderId, stripePaymentIntentId);
+      await this.settleOrder(orderId, stripePaymentIntentId, addOnSelectionsByOrder[orderId] ?? []);
     }
   }
 
   private async settleOrder(
     orderId: string,
     stripePaymentIntentId: string | undefined,
+    selections: AddOnSelectionMeta[] = [],
   ): Promise<void> {
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
@@ -259,6 +393,16 @@ export class OrdersService {
         where: { id: orderId },
         data: { status: OrderStatus.PAID, stripePaymentIntentId, paidAt: new Date() },
       });
+      if (selections.length > 0) {
+        await tx.orderSelectedAddOn.createMany({
+          data: selections.map((s) => ({
+            orderId,
+            addOnId: s.addOnId,
+            priceAtSelectionCents: s.priceAtSelectionCents,
+          })),
+          skipDuplicates: true,
+        });
+      }
       if (order.creditAppliedCents > 0) {
         // Only deducted now, on confirmed payment — never at session
         // creation, so an abandoned checkout never costs the user credit.
@@ -284,7 +428,7 @@ export class OrdersService {
   listMine(userId: string): Promise<Order[]> {
     return this.prisma.order.findMany({
       where: { userId },
-      include: { design: { include: { files: true } } },
+      include: { design: { include: { files: true } }, selectedAddOns: { include: { addOn: true } } },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -295,6 +439,7 @@ export class OrdersService {
         include: {
           design: true,
           user: { select: { email: true, firstName: true, lastName: true } },
+          selectedAddOns: { include: { addOn: true } },
         },
         orderBy: { createdAt: 'desc' },
         skip: (page - 1) * pageSize,

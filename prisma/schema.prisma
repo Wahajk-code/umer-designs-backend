@@ -146,8 +146,25 @@ model Design {
   files         DesignFile[]
   orders        Order[]
   modifications Modification[]
+  addOns        DesignAddOn[]
 
   @@map("designs")
+}
+
+model DesignAddOn {
+  id             String   @id @default(uuid())
+  designId       String   @map("design_id")
+  design         Design   @relation(fields: [designId], references: [id], onDelete: Cascade)
+  label          String
+  description    String?
+  addedCostCents Int      @map("added_cost_cents")
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  selectedAddOns OrderSelectedAddOn[]
+
+  @@map("design_add_ons")
 }
 
 model DesignFile {
@@ -185,8 +202,22 @@ model Order {
   createdAt               DateTime    @default(now()) @map("created_at")
   updatedAt               DateTime    @updatedAt @map("updated_at")
 
+  selectedAddOns OrderSelectedAddOn[]
+
   @@index([stripeCheckoutSessionId])
   @@map("orders")
+}
+
+model OrderSelectedAddOn {
+  id                    String      @id @default(uuid())
+  orderId               String      @map("order_id")
+  order                 Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  addOnId               String      @map("add_on_id")
+  addOn                 DesignAddOn @relation(fields: [addOnId], references: [id], onDelete: Restrict)
+  priceAtSelectionCents Int         @map("price_at_selection_cents")
+
+  @@unique([orderId, addOnId])
+  @@map("order_selected_add_ons")
 }
 
 model ProcessedStripeEvent {
