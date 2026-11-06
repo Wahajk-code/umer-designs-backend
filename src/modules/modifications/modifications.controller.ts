@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Public } from '@/common/decorators/public.decorator';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { ModificationOption } from '@prisma/client';
@@ -18,6 +19,8 @@ export class ModificationsController {
     private readonly optionsService: ModificationOptionsService,
   ) {}
 
+  /** Public: the change menu (with prices) is shown on design pages to signed-out visitors too. */
+  @Public()
   @Get('options')
   listOptions(): Promise<ModificationOption[]> {
     return this.optionsService.listActive();

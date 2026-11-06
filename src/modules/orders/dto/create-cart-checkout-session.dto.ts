@@ -17,6 +17,12 @@ export class CartCheckoutItemDto {
   @ArrayMaxSize(50)
   @IsUUID('4', { each: true })
   addOnIds?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsUUID('4', { each: true })
+  modificationOptionIds?: string[];
 }
 
 export class CreateCartCheckoutSessionDto {

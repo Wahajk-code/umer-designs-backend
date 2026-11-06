@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -7,7 +8,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { randomUUID } from 'crypto';
-import { Modification, ModificationStatus, OrderStatus } from '@prisma/client';
+import { Modification, ModificationStatus, OrderStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '@/modules/prisma/prisma.service';
 import { StripeService } from '@/modules/payments/stripe.service';
 import { CloudinaryService } from '@/modules/cloudinary/cloudinary.service';
@@ -23,23 +24,19 @@ import {
   ModificationStatusChangedPayload,
 } from '@/common/events/domain-events';
 
-const VALID_TRANSITIONS: Record<ModificationStatus, ModificationStatus[]> = {
-  SUBMITTED: [ModificationStatus.IN_REVIEW],
-  IN_REVIEW: [ModificationStatus.IN_PROGRESS],
-  IN_PROGRESS: [ModificationStatus.REVISION, ModificationStatus.DELIVERED],
-  REVISION: [ModificationStatus.IN_PROGRESS, ModificationStatus.DELIVERED],
-  DELIVERED: [],
-};
-
 interface StripeSelectionMetadata {
   optionId: string;
   priceAtSelectionCents: number;
 }
 
+/** Public-safe user fields. Never `author: true` — that would ship passwordHash to the client. */
+const personSelect = { id: true, firstName: true, lastName: true, role: true } as const;
+
 const modificationInclude = {
   design: true,
+  user: { select: { id: true, firstName: true, lastName: true, email: true } },
   selectedOptions: { include: { option: true } },
-  events: { include: { author: true }, orderBy: { createdAt: 'asc' as const } },
+  events: { include: { author: { select: personSelect } }, orderBy: { createdAt: 'asc' as const } },
   files: true,
 };
 
@@ -88,20 +85,26 @@ export class ModificationsService {
       optionId: o.id,
       priceAtSelectionCents: o.addedCostCents,
     }));
-    const optionsTotalCents = selections.reduce((sum, s) => sum + s.priceAtSelectionCents, 0);
-    const totalAmountCents = design.basePriceCents + optionsTotalCents;
+    // The customer already owns (and paid for) this plan — a change request
+    // charges only for the changes themselves, never the plan again.
+    const totalAmountCents = selections.reduce((sum, s) => sum + s.priceAtSelectionCents, 0);
+    if (totalAmountCents < 50) {
+      throw new BadRequestException('The selected changes must total at least $0.50.');
+    }
 
     const origin = this.config.get('corsAllowedOrigin', { infer: true });
     const session = await this.stripe.createCheckoutSession({
-      lineItems: [{ name: `${design.title} — modification`, amountCents: totalAmountCents }],
+      lineItems: options
+        .filter((o) => o.addedCostCents > 0)
+        .map((o) => ({ name: `${design.title} — ${o.label}`, amountCents: o.addedCostCents })),
       customerEmail: userEmail,
-      successUrl: `${origin}/dashboard?modification=submitted`,
+      successUrl: `${origin}/dashboard?modification=submitted&session_id={CHECKOUT_SESSION_ID}`,
       cancelUrl: `${origin}/designs/${design.slug}?modification=cancelled`,
       metadata: {
         kind: 'modification',
         userId,
         designId: design.id,
-        basePriceCents: String(design.basePriceCents),
+        basePriceCents: '0',
         totalAmountCents: String(totalAmountCents),
         selections: JSON.stringify(selections),
       },
@@ -124,9 +127,26 @@ export class ModificationsService {
       return;
     }
 
-    const parsedSelections: StripeSelectionMetadata[] = JSON.parse(selections);
+    // A redelivered/retried webhook must never create a second request.
+    if (stripePaymentIntentId) {
+      const existing = await this.prisma.modification.findUnique({
+        where: { stripePaymentIntentId },
+      });
+      if (existing) {
+        return;
+      }
+    }
 
-    const modification = await this.prisma.modification.create({
+    let parsedSelections: StripeSelectionMetadata[];
+    try {
+      parsedSelections = JSON.parse(selections);
+    } catch {
+      throw new BadRequestException('Malformed modification selections in Stripe metadata.');
+    }
+
+    let modification;
+    try {
+      modification = await this.prisma.modification.create({
       data: {
         userId,
         designId,
@@ -147,6 +167,12 @@ export class ModificationsService {
       },
       include: { design: true },
     });
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        return; // concurrent duplicate delivery lost the race - already created
+      }
+      throw err;
+    }
 
     const payload: ModificationPaidPayload = {
       modificationId: modification.id,
@@ -210,31 +236,46 @@ export class ModificationsService {
       throw new NotFoundException('Modification request not found.');
     }
 
-    const allowed = VALID_TRANSITIONS[modification.status];
-    if (!allowed.includes(toStatus)) {
-      throw new BadRequestException(
-        `Cannot move a request from ${modification.status} to ${toStatus}.`,
-      );
+    // The architect controls the progress bar directly: any stage can be set
+    // (skip ahead, step back, or reopen a delivered request as a revision).
+    // Every move is still audited as a STATUS_CHANGE event and notified.
+    if (modification.status === toStatus) {
+      throw new BadRequestException(`This request is already ${toStatus.replace('_', ' ').toLowerCase()}.`);
     }
+    const reopening = modification.status === ModificationStatus.DELIVERED;
 
-    const updated = await this.prisma.modification.update({
-      where: { id },
-      data: {
-        status: toStatus,
-        ...(toStatus === ModificationStatus.DELIVERED && { deliveredAt: new Date() }),
-      },
-    });
-
-    await this.prisma.modificationEvent.create({
-      data: {
-        modificationId: id,
-        authorId: adminUserId,
-        kind: 'STATUS_CHANGE',
-        fromStatus: modification.status,
-        toStatus,
-        comment,
-      },
-    });
+    // Status change + its audit event commit together, and only if the request
+    // is still in the status the admin saw (two admins can't both advance it).
+    let updated: Modification;
+    try {
+      [updated] = (await this.prisma.$transaction([
+        this.prisma.modification.update({
+          where: { id, status: modification.status },
+          data: {
+            status: toStatus,
+            ...(toStatus === ModificationStatus.DELIVERED && { deliveredAt: new Date() }),
+            ...(reopening && { deliveredAt: null }),
+          },
+        }),
+        this.prisma.modificationEvent.create({
+          data: {
+            modificationId: id,
+            authorId: adminUserId,
+            kind: 'STATUS_CHANGE',
+            fromStatus: modification.status,
+            toStatus,
+            comment,
+          },
+        }),
+      ])) as [Modification, unknown];
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2025') {
+        throw new ConflictException(
+          'This request was just updated by someone else. Refresh and try again.',
+        );
+      }
+      throw err;
+    }
 
     const payload: ModificationStatusChangedPayload = {
       modificationId: id,
@@ -255,8 +296,13 @@ export class ModificationsService {
         where,
         include: {
           design: true,
-          user: { select: { email: true, firstName: true, lastName: true } },
+          user: { select: { id: true, email: true, firstName: true, lastName: true } },
           selectedOptions: { include: { option: true } },
+          events: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: { createdAt: true, kind: true, author: { select: { role: true } } },
+          },
         },
         orderBy: { createdAt: 'desc' },
         skip: (query.page - 1) * query.pageSize,
@@ -265,6 +311,58 @@ export class ModificationsService {
       this.prisma.modification.count({ where }),
     ]);
     return { modifications, total };
+  }
+
+  /** Per-status counts for the admin queue's filter tabs. */
+  async countsByStatus(): Promise<Record<string, number>> {
+    const rows = await this.prisma.modification.groupBy({ by: ['status'], _count: { _all: true } });
+    return Object.fromEntries(rows.map((r) => [r.status, r._count._all]));
+  }
+
+  /**
+   * One conversation per request for the admin Messages inbox, most recent
+   * activity first. `awaitingReply` = the last message came from the client.
+   */
+  async listThreads() {
+    const modifications = await this.prisma.modification.findMany({
+      include: {
+        design: { select: { id: true, title: true, slug: true, coverImageUrl: true } },
+        user: { select: { id: true, email: true, firstName: true, lastName: true } },
+        events: {
+          where: { kind: 'COMMENT' },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+          include: { author: { select: personSelect } },
+        },
+        _count: { select: { events: { where: { kind: 'COMMENT' } } } },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+    });
+
+    return modifications
+      .map((m) => {
+        const last = m.events[0] ?? null;
+        return {
+          modificationId: m.id,
+          status: m.status,
+          createdAt: m.createdAt,
+          design: m.design,
+          client: m.user,
+          messageCount: m._count.events,
+          lastMessage: last
+            ? {
+                comment: last.comment,
+                createdAt: last.createdAt,
+                fromAdmin: last.author?.role === 'ADMIN',
+                authorName: last.author ? `${last.author.firstName} ${last.author.lastName}`.trim() : null,
+              }
+            : null,
+          awaitingReply: Boolean(last && last.author?.role !== 'ADMIN'),
+          lastActivityAt: last?.createdAt ?? m.createdAt,
+        };
+      })
+      .sort((a, b) => new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime());
   }
 
   createUploadSignature(modificationId: string) {

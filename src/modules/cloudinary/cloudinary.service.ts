@@ -64,6 +64,18 @@ export class CloudinaryService {
     return { cloudName: this.cloudName, apiKey: this.apiKey, timestamp, signature, folder };
   }
 
+  /**
+   * Signature for PUBLIC marketing images (design cover + gallery photos).
+   * Deliberately separate from createUploadSignature: plan files stay
+   * `authenticated`; only storefront photos are public `upload` assets.
+   */
+  createPublicImageSignature(folder: string): UploadSignature {
+    this.assertConfigured();
+    const timestamp = Math.round(Date.now() / 1000);
+    const signature = cloudinary.utils.api_sign_request({ timestamp, folder }, this.apiSecret);
+    return { cloudName: this.cloudName, apiKey: this.apiKey, timestamp, signature, folder };
+  }
+
   /** Short-lived signed URL — never a permanent public link — for a purchased/owned file. */
   createSignedDownloadUrl(publicId: string, resourceType: string, format: string): string {
     this.assertConfigured();

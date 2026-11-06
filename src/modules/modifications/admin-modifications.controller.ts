@@ -34,6 +34,16 @@ export class AdminModificationsController {
     return { modifications, total, page: query.page, pageSize: query.pageSize };
   }
 
+  @Get('counts')
+  counts() {
+    return this.modificationsService.countsByStatus();
+  }
+
+  @Get('threads')
+  threads() {
+    return this.modificationsService.listThreads();
+  }
+
   @Patch(':id/status')
   updateStatus(
     @CurrentUser() admin: AuthenticatedUser,

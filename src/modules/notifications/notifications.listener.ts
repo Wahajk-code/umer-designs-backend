@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { ConfigService } from '@nestjs/config';
-import { ModificationStatus, NotificationType } from '@prisma/client';
+import { ModificationStatus, NotificationType, Prisma, Role } from '@prisma/client';
 import { NotificationsService } from '@/modules/notifications/notifications.service';
 import { MailService } from '@/modules/mail/mail.service';
 import { renderEmail } from '@/modules/mail/email-template';
@@ -12,6 +12,7 @@ import {
   MeetingBookedPayload,
   MeetingCancelledPayload,
   MeetingConfirmedPayload,
+  ModificationCommentAddedPayload,
   ModificationPaidPayload,
   ModificationStatusChangedPayload,
   OrderPaidPayload,
@@ -40,6 +41,45 @@ export class NotificationsListener {
     return this.config.get('corsAllowedOrigin', { infer: true });
   }
 
+  /**
+   * In-app (bell) notification for every active admin. Tagged
+   * `audience: 'admin'` so the bell links them into /admin, not the client
+   * dashboard. Email to admins goes once, to ADMIN_NOTIFY_EMAIL (emailAdmin).
+   */
+  private async notifyAdmins(type: NotificationType, payload: Record<string, unknown>): Promise<void> {
+    const admins = await this.prisma.user.findMany({
+      where: { role: Role.ADMIN, deletedAt: null },
+      select: { id: true },
+    });
+    await Promise.all(
+      admins.map((admin) =>
+        this.notifications.notify(admin.id, type, { ...payload, audience: 'admin' } as Prisma.InputJsonValue),
+      ),
+    );
+  }
+
+  /** Display name + email for a user, so admin notifications say WHO (never throws). */
+  private async person(userId: string | null | undefined): Promise<{ name: string; email?: string }> {
+    if (!userId) return { name: 'A client' };
+    try {
+      const u = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { firstName: true, lastName: true, email: true },
+      });
+      if (!u) return { name: 'A client' };
+      return { name: `${u.firstName ?? ''} ${u.lastName ?? ''}`.trim() || u.email, email: u.email };
+    } catch {
+      return { name: 'A client' };
+    }
+  }
+
+  private async emailAdmin(subject: string, heading: string, body: string, ctaLabel: string, ctaPath: string): Promise<void> {
+    const to = this.config.get('adminNotifyEmail', { infer: true });
+    if (!to) return;
+    const { html, text } = renderEmail({ heading, body, ctaLabel, ctaUrl: `${this.origin}${ctaPath}` });
+    await this.mail.send({ to, subject, html, text });
+  }
+
   @OnEvent(DomainEvent.ORDER_PAID)
   async onOrderPaid(payload: OrderPaidPayload): Promise<void> {
     await this.notifications.notify(
@@ -55,8 +95,24 @@ export class NotificationsListener {
         heading: 'Your order is confirmed',
         body: `Thanks for buying ${payload.designTitle}. Your files are ready in your account, yours to re-download any time.`,
         ctaLabel: 'View your designs',
-        ctaUrl: `${this.origin}/dashboard`,
+        ctaUrl: `${this.origin}/dashboard/designs`,
       },
+    );
+
+    const client = await this.person(payload.userId);
+    await this.notifyAdmins(NotificationType.ORDER_CONFIRMED, {
+      orderId: payload.orderId,
+      designTitle: payload.designTitle,
+      amountCents: payload.amountCents,
+      clientName: client.name,
+      clientEmail: client.email,
+    });
+    await this.emailAdmin(
+      `New order from ${client.name} — ${payload.designTitle}`,
+      'New plan sold',
+      `${client.name}${client.email ? ` (${client.email})` : ''} just bought ${payload.designTitle} (${(payload.amountCents / 100).toFixed(2)} USD).`,
+      'Open admin',
+      '/admin',
     );
   }
 
@@ -75,24 +131,82 @@ export class NotificationsListener {
         heading: 'Payment received — work is starting',
         body: `We've received your payment for changes to ${payload.designTitle}. Track progress and message the architect from your request page.`,
         ctaLabel: 'View tracking',
-        ctaUrl: `${this.origin}/modifications/${payload.modificationId}`,
+        ctaUrl: `${this.origin}/dashboard/requests/${payload.modificationId}`,
       },
     );
 
+    const client = await this.person(payload.userId);
     if (this.config.get('adminNotifyEmail', { infer: true })) {
       const { html, text } = renderEmail({
         heading: 'New paid modification request',
-        body: `A client just paid for changes to ${payload.designTitle}. Open the admin queue to review it.`,
+        body: `${client.name}${client.email ? ` (${client.email})` : ''} just paid for changes to ${payload.designTitle}. Open the admin queue to review it.`,
         ctaLabel: 'Open admin queue',
         ctaUrl: `${this.origin}/admin/modifications/${payload.modificationId}`,
       });
       await this.mail.send({
         to: this.config.get('adminNotifyEmail', { infer: true }),
-        subject: `New modification request — ${payload.designTitle}`,
+        subject: `New modification request from ${client.name} — ${payload.designTitle}`,
         html,
         text,
       });
     }
+    await this.notifyAdmins(NotificationType.PAYMENT_RECEIVED, {
+      modificationId: payload.modificationId,
+      designTitle: payload.designTitle,
+      totalAmountCents: payload.totalAmountCents,
+      clientName: client.name,
+      clientEmail: client.email,
+    });
+  }
+
+  /**
+   * Messages on a request reach the OTHER side: an architect reply notifies
+   * the client (bell + email); a client message notifies the admins.
+   */
+  @OnEvent(DomainEvent.MODIFICATION_COMMENT_ADDED)
+  async onModificationCommentAdded(payload: ModificationCommentAddedPayload): Promise<void> {
+    const modification = await this.prisma.modification.findUnique({
+      where: { id: payload.modificationId },
+      include: { design: true },
+    });
+    if (!modification) {
+      this.logger.warn(`Comment event for unknown modification ${payload.modificationId}`);
+      return;
+    }
+    const title = modification.design.title;
+    const preview = payload.comment.length > 140 ? `${payload.comment.slice(0, 137)}…` : payload.comment;
+    const [author, client] = await Promise.all([this.person(payload.authorId), this.person(modification.userId)]);
+    const data = {
+      modificationId: modification.id,
+      designTitle: title,
+      kind: 'message',
+      preview,
+      authorName: author.name,
+    };
+
+    if (payload.isAdminAuthor) {
+      await this.notifications.notify(modification.userId, NotificationType.STATUS_CHANGE, data, {
+        subject: `New message from your architect — ${title}`,
+        heading: 'You have a new message',
+        body: `“${preview}”`,
+        ctaLabel: 'Reply on your request page',
+        ctaUrl: `${this.origin}/dashboard/requests/${modification.id}`,
+      });
+      return;
+    }
+
+    await this.notifyAdmins(NotificationType.STATUS_CHANGE, {
+      ...data,
+      clientName: client.name,
+      clientEmail: client.email,
+    });
+    await this.emailAdmin(
+      `New message from ${client.name} — ${title}`,
+      `${client.name} sent a message`,
+      `About ${title}${client.email ? ` (${client.email})` : ''}: “${preview}”`,
+      'Reply in admin',
+      `/admin/messages?id=${modification.id}`,
+    );
   }
 
   @OnEvent(DomainEvent.MODIFICATION_STATUS_CHANGED)
@@ -123,7 +237,7 @@ export class NotificationsListener {
           ? `Your modified plans for ${modification.design.title} are ready to download from your request page.`
           : `Your request for ${modification.design.title} has moved to "${stageLabel}".${payload.comment ? ` Note from the architect: ${payload.comment}` : ''}`,
         ctaLabel: 'View tracking',
-        ctaUrl: `${this.origin}/modifications/${payload.modificationId}`,
+        ctaUrl: `${this.origin}/dashboard/requests/${payload.modificationId}`,
       },
     );
   }
@@ -141,16 +255,24 @@ export class NotificationsListener {
       },
     );
 
+    const client = await this.person(payload.userId);
     const adminEmail = this.config.get('adminNotifyEmail', { infer: true });
     if (adminEmail) {
       const { html, text } = renderEmail({
         heading: 'New meeting request',
-        body: `A client requested a meeting for ${new Date(payload.scheduledAt).toLocaleString()}.`,
+        body: `${client.name}${client.email ? ` (${client.email})` : ''} requested a meeting for ${new Date(payload.scheduledAt).toLocaleString()}.`,
         ctaLabel: 'Open admin meetings',
         ctaUrl: `${this.origin}/admin/meetings`,
       });
-      await this.mail.send({ to: adminEmail, subject: 'New meeting request', html, text });
+      await this.mail.send({ to: adminEmail, subject: `New meeting request from ${client.name}`, html, text });
     }
+    await this.notifyAdmins(NotificationType.MEETING_BOOKED, {
+      meetingId: payload.meetingId,
+      status: 'REQUESTED',
+      scheduledAt: payload.scheduledAt,
+      clientName: client.name,
+      clientEmail: client.email,
+    });
   }
 
   @OnEvent(DomainEvent.MEETING_CONFIRMED)
@@ -231,6 +353,12 @@ export class NotificationsListener {
       });
       await this.mail.send({ to: adminEmail, subject: 'Payment link paid', html, text });
     }
+    await this.notifyAdmins(NotificationType.PAYMENT_RECEIVED, {
+      paymentLinkId: payload.paymentLinkId,
+      description: payload.description,
+      amountCents: payload.amountCents,
+      clientEmail: payload.clientEmail,
+    });
   }
 
   @OnEvent(DomainEvent.REFERRAL_REWARDED)
@@ -245,7 +373,7 @@ export class NotificationsListener {
         heading: `$${amount} earned`,
         body: `Someone you referred just made their first purchase — $${amount} credit is now yours.`,
         ctaLabel: 'View referrals',
-        ctaUrl: `${this.origin}/dashboard`,
+        ctaUrl: `${this.origin}/dashboard/referrals`,
       },
     );
   }

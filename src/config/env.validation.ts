@@ -40,7 +40,17 @@ export const envValidationSchema = Joi.object({
   CLOUDINARY_API_SECRET: Joi.string().allow('').default(''),
   CLOUDINARY_SIGNED_URL_TTL_SECONDS: Joi.number().default(300),
 
+  // Test and live keys can sit side by side; STRIPE_MODE (default: live in
+  // production, test otherwise) picks which set is used. See stripe-config.ts.
+  STRIPE_MODE: Joi.string().valid('', 'test', 'live').default(''),
+  // Local-dev stand-in for the Stripe webhook; ignored in production / live mode.
+  STRIPE_LOCAL_CONFIRM: Joi.string().valid('', 'true', 'false').default(''),
   STRIPE_SECRET_KEY: Joi.string().allow('').default(''),
+  STRIPE_SECRET_KEY_TEST: Joi.string().allow('').default(''),
+  STRIPE_SECRET_KEY_LIVE: Joi.string().allow('').default(''),
+  STRIPE_PUBLISHABLE_KEY: Joi.string().allow('').default(''),
+  STRIPE_PUBLISHABLE_KEY_TEST: Joi.string().allow('').default(''),
+  STRIPE_PUBLISHABLE_KEY_LIVE: Joi.string().allow('').default(''),
 
   SMTP_HOST: Joi.string().allow('').default(''),
   SMTP_PORT: Joi.number().default(587),

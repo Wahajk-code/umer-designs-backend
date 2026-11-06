@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createTransport, Transporter } from 'nodemailer';
 import { AppConfig } from '@/config/configuration';
@@ -18,7 +18,7 @@ export interface SendEmailInput {
  * checkout/status-update/etc. request flows.
  */
 @Injectable()
-export class MailService {
+export class MailService implements OnModuleInit {
   private readonly logger = new Logger(MailService.name);
   private readonly transporter: Transporter | null;
   private readonly from: string;
@@ -33,8 +33,27 @@ export class MailService {
             port: smtp.port,
             secure: smtp.port === 465,
             auth: { user: smtp.user, pass: smtp.pass },
+            // Never let a dead SMTP host hang a request that triggered an email.
+            connectionTimeout: 10_000,
+            greetingTimeout: 10_000,
+            socketTimeout: 20_000,
           })
         : null;
+  }
+
+  /** Logs a clear pass/fail at boot so a wrong SMTP login is caught on deploy, not on the first customer email. */
+  async onModuleInit(): Promise<void> {
+    if (!this.transporter) {
+      this.logger.warn('SMTP not configured - emails are disabled (in-app notifications still work).');
+      return;
+    }
+    try {
+      await this.transporter.verify();
+      this.logger.log(`SMTP connection verified (sending as ${this.from}).`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'unknown error';
+      this.logger.error(`SMTP verification FAILED - emails will not send: ${message}`);
+    }
   }
 
   isConfigured(): boolean {

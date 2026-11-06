@@ -9,14 +9,20 @@ describe('NotificationsListener', () => {
   let listener: NotificationsListener;
   let notifications: jest.Mocked<Pick<NotificationsService, 'notify'>>;
   let mail: jest.Mocked<Pick<MailService, 'send'>>;
-  let prisma: { modification: { findUnique: jest.Mock } };
+  let prisma: { modification: { findUnique: jest.Mock }; user: { findMany: jest.Mock; findUnique: jest.Mock } };
   let config: ConfigService<AppConfig, true>;
   let adminEmail = '';
 
   beforeEach(() => {
     notifications = { notify: jest.fn().mockResolvedValue({}) };
     mail = { send: jest.fn().mockResolvedValue(true) };
-    prisma = { modification: { findUnique: jest.fn() } };
+    prisma = {
+      modification: { findUnique: jest.fn() },
+      user: {
+        findMany: jest.fn().mockResolvedValue([{ id: 'admin-1' }, { id: 'admin-2' }]),
+        findUnique: jest.fn().mockResolvedValue({ firstName: 'Sara', lastName: 'Khan', email: 'sara@example.com' }),
+      },
+    };
     adminEmail = '';
     config = {
       get: (key: string) => {
@@ -27,6 +33,55 @@ describe('NotificationsListener', () => {
     } as unknown as ConfigService<AppConfig, true>;
 
     listener = new NotificationsListener(notifications as any, mail as any, prisma as any, config);
+  });
+
+  describe('who gets what', () => {
+    const mod = { id: 'm1', userId: 'client-1', design: { title: 'The Meridian' } };
+
+    it('an architect reply notifies the CLIENT (bell + email), not the admins', async () => {
+      prisma.modification.findUnique.mockResolvedValue(mod);
+      await listener.onModificationCommentAdded({
+        modificationId: 'm1',
+        userId: 'client-1',
+        authorId: 'admin-1',
+        isAdminAuthor: true,
+        comment: 'Updated the kitchen layout',
+      });
+      expect(notifications.notify).toHaveBeenCalledTimes(1);
+      expect(notifications.notify).toHaveBeenCalledWith(
+        'client-1',
+        NotificationType.STATUS_CHANGE,
+        expect.objectContaining({ kind: 'message', modificationId: 'm1' }),
+        expect.objectContaining({ ctaUrl: 'https://umerdesigns.example/dashboard/requests/m1' }),
+      );
+      expect(prisma.user.findMany).not.toHaveBeenCalled();
+    });
+
+    it('a client message notifies every ADMIN in-app and emails ADMIN_NOTIFY_EMAIL — never the client', async () => {
+      adminEmail = 'studio@example.com';
+      prisma.modification.findUnique.mockResolvedValue(mod);
+      await listener.onModificationCommentAdded({
+        modificationId: 'm1',
+        userId: 'client-1',
+        authorId: 'client-1',
+        isAdminAuthor: false,
+        comment: 'Can we add a skylight?',
+      });
+      const recipients = notifications.notify.mock.calls.map((c) => c[0]);
+      expect(recipients).toEqual(['admin-1', 'admin-2']);
+      expect(notifications.notify.mock.calls[0][2]).toEqual(
+        expect.objectContaining({ audience: 'admin', clientName: 'Sara Khan', authorName: 'Sara Khan', designTitle: 'The Meridian' }),
+      );
+      expect(mail.send).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'studio@example.com', subject: 'New message from Sara Khan — The Meridian' }),
+      );
+    });
+
+    it('a new order also tells the admins', async () => {
+      await listener.onOrderPaid({ orderId: 'o1', userId: 'u1', designId: 'd1', designTitle: 'X', amountCents: 100 });
+      const recipients = notifications.notify.mock.calls.map((c) => c[0]);
+      expect(recipients).toEqual(['u1', 'admin-1', 'admin-2']);
+    });
   });
 
   it('notifies the buyer on ORDER_PAID with type ORDER_CONFIRMED', async () => {

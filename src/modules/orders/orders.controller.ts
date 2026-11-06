@@ -25,6 +25,7 @@ export class OrdersController {
       user.email,
       dto.designId,
       dto.addOnIds ?? [],
+      dto.modificationOptionIds ?? [],
     );
   }
 

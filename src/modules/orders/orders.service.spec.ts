@@ -176,6 +176,23 @@ describe('OrdersService', () => {
       expect(result.checkoutUrl).toBe('https://checkout.stripe.com/cs_test_1');
     });
 
+    it('never leaves less than the Stripe $0.50 minimum to charge when credit nearly covers the price', async () => {
+      prisma.design.findUnique.mockResolvedValue(design);
+      // 20 cents short of covering the whole price -> Stripe could not charge 20 cents
+      prisma.user.findUniqueOrThrow.mockResolvedValue({ id: 'u1', creditBalanceCents: 144980 });
+      prisma.order.findFirst.mockResolvedValue(null);
+      prisma.order.create.mockResolvedValue({ id: 'order-1' });
+
+      await service.createCheckoutSession('u1', 'a@example.com', 'design-1');
+
+      expect(prisma.order.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ amountCents: 50, creditAppliedCents: 144950 }),
+      });
+      expect(stripe.createCheckoutSession).toHaveBeenCalledWith(
+        expect.objectContaining({ lineItems: [expect.objectContaining({ amountCents: 50 })] }),
+      );
+    });
+
     it('skips Stripe entirely and marks the order paid when credit balance fully covers the price', async () => {
       prisma.design.findUnique.mockResolvedValue(design);
       prisma.user.findUniqueOrThrow.mockResolvedValue({ id: 'u1', creditBalanceCents: 200000 });

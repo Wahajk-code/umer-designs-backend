@@ -121,6 +121,11 @@ export class DesignsService {
     return this.cloudinary.createUploadSignature(`designs/${designId}`);
   }
 
+  /** Public storefront photos (cover/gallery) — not purchasable plan files. */
+  createImageSignature() {
+    return this.cloudinary.createPublicImageSignature('design-images');
+  }
+
   async addFile(designId: string, dto: CreateDesignFileDto): Promise<DesignFile> {
     await this.findByIdAdmin(designId);
     return this.prisma.designFile.create({

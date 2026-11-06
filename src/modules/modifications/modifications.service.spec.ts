@@ -1,4 +1,9 @@
-import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { ModificationStatus } from '@prisma/client';
@@ -139,7 +144,7 @@ describe('ModificationsService', () => {
       );
     });
 
-    it('computes total as base price + sum of selected options and builds Stripe metadata', async () => {
+    it('charges only the selected changes (the plan is already owned) and builds Stripe metadata', async () => {
       prisma.design.findUnique.mockResolvedValue(design);
       prisma.order.findFirst.mockResolvedValue({ id: 'order-1' });
       optionsService.findManyByIds.mockResolvedValue([addRoomOption, resizeOption]);
@@ -148,13 +153,16 @@ describe('ModificationsService', () => {
 
       expect(stripe.createCheckoutSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          lineItems: [expect.objectContaining({ amountCents: 145000 + 50000 + 35000 })],
+          lineItems: [
+            expect.objectContaining({ amountCents: 50000 }),
+            expect.objectContaining({ amountCents: 35000 }),
+          ],
           metadata: expect.objectContaining({
             kind: 'modification',
             userId: 'u1',
             designId: 'design-1',
-            basePriceCents: '145000',
-            totalAmountCents: '230000',
+            basePriceCents: '0',
+            totalAmountCents: '85000',
           }),
         }),
       );
@@ -210,7 +218,45 @@ describe('ModificationsService', () => {
     });
   });
 
+  describe('handleCheckoutCompleted (redelivery)', () => {
+    it('does not create a second request when this payment was already processed', async () => {
+      prisma.modification.findUnique.mockResolvedValue({ id: 'mod-existing' });
+
+      await service.handleCheckoutCompleted(
+        {
+          userId: 'u1',
+          designId: 'design-1',
+          basePriceCents: '145000',
+          totalAmountCents: '230000',
+          selections: '[]',
+        },
+        'pi_dup',
+      );
+
+      expect(prisma.modification.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe('updateStatus', () => {
+    it('reports a conflict when someone else already moved the request', async () => {
+      const { Prisma } = jest.requireActual('@prisma/client');
+      prisma.modification.findUnique.mockResolvedValue({
+        id: 'mod-1',
+        status: ModificationStatus.SUBMITTED,
+        userId: 'u1',
+      });
+      prisma.modification.update.mockRejectedValue(
+        new Prisma.PrismaClientKnownRequestError('not found', {
+          code: 'P2025',
+          clientVersion: '5.0.0',
+        }),
+      );
+
+      await expect(
+        service.updateStatus('admin-1', 'mod-1', ModificationStatus.IN_REVIEW, undefined),
+      ).rejects.toThrow(ConflictException);
+    });
+
     it('allows SUBMITTED -> IN_REVIEW', async () => {
       prisma.modification.findUnique.mockResolvedValue({
         id: 'mod-1',
@@ -225,21 +271,36 @@ describe('ModificationsService', () => {
       await service.updateStatus('admin-1', 'mod-1', ModificationStatus.IN_REVIEW, undefined);
 
       expect(prisma.modification.update).toHaveBeenCalledWith({
-        where: { id: 'mod-1' },
+        where: { id: 'mod-1', status: ModificationStatus.SUBMITTED },
         data: { status: ModificationStatus.IN_REVIEW },
       });
     });
 
-    it('rejects an illegal transition (e.g. SUBMITTED -> DELIVERED)', async () => {
+    it('rejects setting the stage the request is already in', async () => {
+      prisma.modification.findUnique.mockResolvedValue({
+        id: 'mod-1',
+        status: ModificationStatus.IN_REVIEW,
+        userId: 'u1',
+      });
+
+      await expect(
+        service.updateStatus('admin-1', 'mod-1', ModificationStatus.IN_REVIEW, undefined),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('lets the architect jump stages (SUBMITTED -> IN_PROGRESS)', async () => {
       prisma.modification.findUnique.mockResolvedValue({
         id: 'mod-1',
         status: ModificationStatus.SUBMITTED,
         userId: 'u1',
       });
+      prisma.modification.update.mockResolvedValue({});
 
-      await expect(
-        service.updateStatus('admin-1', 'mod-1', ModificationStatus.DELIVERED, undefined),
-      ).rejects.toThrow(BadRequestException);
+      await service.updateStatus('admin-1', 'mod-1', ModificationStatus.IN_PROGRESS, undefined);
+      expect(prisma.modification.update).toHaveBeenCalledWith({
+        where: { id: 'mod-1', status: ModificationStatus.SUBMITTED },
+        data: { status: ModificationStatus.IN_PROGRESS },
+      });
     });
 
     it('allows IN_PROGRESS -> REVISION and REVISION -> IN_PROGRESS (revision cycles)', async () => {
@@ -252,7 +313,7 @@ describe('ModificationsService', () => {
 
       await service.updateStatus('admin-1', 'mod-1', ModificationStatus.REVISION, 'needs a tweak');
       expect(prisma.modification.update).toHaveBeenCalledWith({
-        where: { id: 'mod-1' },
+        where: { id: 'mod-1', status: ModificationStatus.IN_PROGRESS },
         data: { status: ModificationStatus.REVISION },
       });
     });
@@ -268,20 +329,24 @@ describe('ModificationsService', () => {
       await service.updateStatus('admin-1', 'mod-1', ModificationStatus.DELIVERED, undefined);
 
       expect(prisma.modification.update).toHaveBeenCalledWith({
-        where: { id: 'mod-1' },
+        where: { id: 'mod-1', status: ModificationStatus.IN_PROGRESS },
         data: { status: ModificationStatus.DELIVERED, deliveredAt: expect.any(Date) },
       });
     });
 
-    it('rejects any transition out of the terminal DELIVERED state', async () => {
+    it('reopening a DELIVERED request clears deliveredAt', async () => {
       prisma.modification.findUnique.mockResolvedValue({
         id: 'mod-1',
         status: ModificationStatus.DELIVERED,
         userId: 'u1',
       });
-      await expect(
-        service.updateStatus('admin-1', 'mod-1', ModificationStatus.IN_PROGRESS, undefined),
-      ).rejects.toThrow(BadRequestException);
+      prisma.modification.update.mockResolvedValue({});
+
+      await service.updateStatus('admin-1', 'mod-1', ModificationStatus.REVISION, 'client asked for a tweak');
+      expect(prisma.modification.update).toHaveBeenCalledWith({
+        where: { id: 'mod-1', status: ModificationStatus.DELIVERED },
+        data: { status: ModificationStatus.REVISION, deliveredAt: null },
+      });
     });
   });
 

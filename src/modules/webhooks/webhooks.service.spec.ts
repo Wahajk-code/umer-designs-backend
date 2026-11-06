@@ -13,13 +13,15 @@ function duplicateKeyError(): Prisma.PrismaClientKnownRequestError {
 
 describe('WebhooksService', () => {
   let service: WebhooksService;
-  let prisma: { processedStripeEvent: { create: jest.Mock } };
+  let prisma: { processedStripeEvent: { create: jest.Mock; delete: jest.Mock } };
   let ordersService: jest.Mocked<Pick<OrdersService, 'handleCheckoutCompleted'>>;
   let modificationsService: jest.Mocked<Pick<ModificationsService, 'handleCheckoutCompleted'>>;
   let paymentLinksService: jest.Mocked<Pick<PaymentLinksService, 'handleCheckoutCompleted'>>;
 
   beforeEach(() => {
-    prisma = { processedStripeEvent: { create: jest.fn() } };
+    prisma = {
+      processedStripeEvent: { create: jest.fn(), delete: jest.fn().mockResolvedValue({}) },
+    };
     ordersService = { handleCheckoutCompleted: jest.fn().mockResolvedValue(undefined) };
     modificationsService = { handleCheckoutCompleted: jest.fn().mockResolvedValue(undefined) };
     paymentLinksService = { handleCheckoutCompleted: jest.fn().mockResolvedValue(undefined) };
@@ -29,6 +31,22 @@ describe('WebhooksService', () => {
       modificationsService as any,
       paymentLinksService as any,
     );
+  });
+
+  it('releases the idempotency marker when handling fails so the Stripe retry is processed', async () => {
+    prisma.processedStripeEvent.create.mockResolvedValue({});
+    ordersService.handleCheckoutCompleted.mockRejectedValue(new Error('db down'));
+
+    await expect(
+      service.processStripeEvent({
+        eventId: 'evt_fail',
+        eventType: 'checkout.session.completed',
+        paymentIntentId: 'pi_1',
+        metadata: { kind: 'design_order', recordId: 'order-1' },
+      }),
+    ).rejects.toThrow('db down');
+
+    expect(prisma.processedStripeEvent.delete).toHaveBeenCalledWith({ where: { id: 'evt_fail' } });
   });
 
   it('routes a checkout.session.completed design_order event to OrdersService', async () => {
@@ -44,6 +62,7 @@ describe('WebhooksService', () => {
     expect(ordersService.handleCheckoutCompleted).toHaveBeenCalledWith(
       'order-1',
       'pi_1',
+      undefined,
       undefined,
     );
   });

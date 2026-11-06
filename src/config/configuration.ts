@@ -1,3 +1,4 @@
+import { resolveStripeConfig } from './stripe-config';
 export interface AppConfig {
   nodeEnv: string;
   port: number;
@@ -26,7 +27,10 @@ export interface AppConfig {
     signedUrlTtlSeconds: number;
   };
   stripe: {
+    mode: 'test' | 'live';
     secretKey: string;
+    publishableKey: string;
+    localConfirm: boolean;
   };
   smtp: {
     host: string;
@@ -75,9 +79,7 @@ export default (): AppConfig => ({
     apiSecret: process.env.CLOUDINARY_API_SECRET ?? '',
     signedUrlTtlSeconds: parseInt(process.env.CLOUDINARY_SIGNED_URL_TTL_SECONDS ?? '300', 10),
   },
-  stripe: {
-    secretKey: process.env.STRIPE_SECRET_KEY ?? '',
-  },
+  stripe: resolveStripeConfig(process.env),
   smtp: {
     host: process.env.SMTP_HOST ?? '',
     port: parseInt(process.env.SMTP_PORT ?? '587', 10),

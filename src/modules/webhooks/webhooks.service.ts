@@ -25,7 +25,17 @@ export class WebhooksService {
     }
 
     if (dto.eventType === 'checkout.session.completed') {
-      await this.routeCheckoutCompleted(dto);
+      try {
+        await this.routeCheckoutCompleted(dto);
+      } catch (err) {
+        // Release the idempotency marker so Stripe's automatic retry is
+        // processed instead of being skipped as "already handled" - otherwise
+        // a transient failure would leave a paid order stuck in PENDING forever.
+        await this.prisma.processedStripeEvent
+          .delete({ where: { id: dto.eventId } })
+          .catch(() => undefined);
+        throw err;
+      }
     }
 
     return { received: true };
@@ -51,6 +61,7 @@ export class WebhooksService {
           recordId,
           dto.paymentIntentId,
           dto.metadata?.addOnSelections,
+          dto.metadata?.modifications,
         );
         break;
       }
@@ -64,6 +75,7 @@ export class WebhooksService {
           recordIds.split(',').filter(Boolean),
           dto.paymentIntentId,
           dto.metadata?.addOnSelectionsByOrder,
+          dto.metadata,
         );
         break;
       }

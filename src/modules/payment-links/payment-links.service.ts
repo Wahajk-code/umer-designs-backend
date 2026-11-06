@@ -112,7 +112,7 @@ export class PaymentLinksService {
     const session = await this.stripe.createCheckoutSession({
       lineItems: [{ name: link.description, amountCents: link.amountCents }],
       customerEmail: link.clientEmail,
-      successUrl: `${origin}/pay/${rawToken}?paid=1`,
+      successUrl: `${origin}/pay/${rawToken}?paid=1&session_id={CHECKOUT_SESSION_ID}`,
       cancelUrl: `${origin}/pay/${rawToken}?cancelled=1`,
       metadata: { kind: 'payment_link', recordId: link.id },
       idempotencyKey: `payment-link-${link.id}-${randomUUID()}`,

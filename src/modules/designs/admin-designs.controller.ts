@@ -50,6 +50,11 @@ export class AdminDesignsController {
     return this.designsService.update(id, dto);
   }
 
+  @Post('image-signature')
+  createImageSignature(): UploadSignature {
+    return this.designsService.createImageSignature();
+  }
+
   @Post(':id/upload-signature')
   createUploadSignature(@Param('id') id: string): UploadSignature {
     return this.designsService.createUploadSignature(id);
